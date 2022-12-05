@@ -129,6 +129,89 @@ const struct ipu_isys_pixelformat ipu_isys_pfmts_packed[] = {
 	{}
 };
 
+static int ipu_isys_query_sensor_info(struct media_pad *source_pad,
+				      struct ipu_isys_pipeline *ip);
+
+static int media_pipeline_enumerate_by_vc(struct ipu_isys_video *av)
+{
+	int ret = -ENOLINK;
+	int i;
+	int entity_vc = INVALIA_VC_ID;
+	u32 n;
+	struct ipu_isys_pipeline ipx;
+	struct media_pipeline *pipe = &ipx.pipe;
+	struct media_entity *entity = &av->vdev.entity;
+	struct media_device *mdev = entity->graph_obj.mdev;
+	struct media_graph *graph = &pipe->graph;
+	struct media_entity *entity_err = entity;
+	struct media_link *link;
+	struct ipu_isys_pipeline *ip = &ipx;
+	struct media_pad *source_pad = media_entity_remote_pad(&av->pad);
+	unsigned int pad_id;
+	struct v4l2_subdev *sd;
+	/* setting vc state */
+	struct v4l2_ext_control c = {.id = V4L2_CID_IPU_SET_SUB_STREAM, };
+	struct v4l2_ext_controls cs = {.count = 1,
+		.controls = &c,
+	};
+
+	if (!source_pad) {
+		dev_err(entity->graph_obj.mdev->dev, "no remote pad found\n");
+		return ret;
+	}
+	pad_id = source_pad->index;
+	mutex_lock(&mdev->graph_mutex);
+
+	ret = media_graph_walk_init(&pipe->graph, mdev);
+		if (ret)
+			goto error_graph_walk_start;
+
+	ret = ipu_isys_query_sensor_info(source_pad, ip);
+	if (ret) {
+		dev_err(entity->graph_obj.mdev->dev,
+			"query sensor info failed\n");
+		return ret;
+	}
+
+	media_graph_walk_start(&pipe->graph, entity);
+	while ((entity = media_graph_walk_next(graph))) {
+		/*
+		 * If entity's pipe is not null and it is video device, it has
+		 * be enabled.
+		 */
+		if (entity->pipe && is_media_entity_v4l2_video_device(entity))
+			continue;
+
+		sd = media_entity_to_v4l2_subdev(entity);
+		if (!entity)
+			continue;
+		if (!sd->name)
+			continue;
+		if (!sd->ctrl_handler)
+			continue;
+		if (!strlen(sd->name))
+			continue;
+		printk("%s, %d DIMA v4l2_ctrl_add_handler for %s vc[%d]\n", __func__, __LINE__, sd->name, ip->vc);
+		v4l2_ctrl_add_handler(&av->ctrl_handler,
+							  sd->ctrl_handler, NULL, true);
+		printk("%s, %d DIMA set vc state for %s vc[%d]\n", __func__, __LINE__, sd->name, ip->vc);
+		c.value64 = SUB_STREAM_SET_VALUE(ip->vc, 0xff);
+		v4l2_s_ext_ctrls(NULL, sd->ctrl_handler,
+						 sd->devnode,
+						 sd->v4l2_dev->mdev,
+						 &cs);
+	}
+	media_graph_walk_cleanup(graph);
+	mutex_unlock(&mdev->graph_mutex);
+
+	return 0;
+error_graph_walk_start:
+	media_graph_walk_cleanup(graph);
+	mutex_unlock(&mdev->graph_mutex);
+
+	return ret;
+}
+
 static int video_open(struct file *file)
 {
 	struct ipu_isys_video *av = video_drvdata(file);
@@ -162,7 +245,12 @@ static int video_open(struct file *file)
 		goto out_v4l2_fh_release;
 
 	mutex_lock(&isys->mutex);
-
+/*** DIMA XXX */
+// #if 0
+	if (media_entity_remote_pad(&av->pad)) {
+		media_pipeline_enumerate_by_vc(av);
+	}
+// #endif
 	if (isys->video_opened++) {
 		/* Already open */
 		mutex_unlock(&isys->mutex);
@@ -310,6 +398,25 @@ ipu_isys_get_pixelformat(struct ipu_isys_video *av, u32 pixelformat)
 
 	WARN_ON(1);
 	return NULL;
+}
+
+static int ipu_isys_get_parm(struct file *file, void *fh, struct v4l2_streamparm *a)
+{
+    // struct ipu_isys_video *av = video_drvdata(file);
+
+    a->parm.capture.timeperframe.numerator = 1;
+    a->parm.capture.timeperframe.denominator = 12;
+	printk("%s, %d DIMA YYY\n", __func__, __LINE__);
+
+    return 0;
+}
+
+static int ipu_isys_set_parm(struct file *file, void *fh, struct v4l2_streamparm *a)
+{
+    //    struct ipu_isys_video *av = video_drvdata(file);
+	printk("%s, %d DIMA YYY\n", __func__, __LINE__);
+
+        return 0;
 }
 
 int ipu_isys_vidioc_querycap(struct file *file, void *fh,
@@ -1368,7 +1475,7 @@ static int ipu_isys_query_sensor_info(struct media_pad *source_pad,
 			(pad_id - NR_OF_CSI2_BE_SOC_SINK_PADS)) {
 			ip->vc = ip->asv[qm.index].vc;
 			flag = true;
-			pr_info("The current entityvc:id:%d\n", ip->vc);
+			pr_info("The current entityvc:id:%d for: %s\n", ip->vc, sd->name);
 		}
 	}
 
@@ -1833,7 +1940,8 @@ printk("%s, %d\n", __func__, __LINE__);
 		/* Non-subdev nodes can be safely ignored here. */
 		if (!is_media_entity_v4l2_subdev(entity))
 			continue;
-
+		dev_info(dev, "DIMA s_stream %s entity %s\n", state ? "on" : "off",
+			entity->name);
 		/* Don't start truly external devices quite yet. */
 		if (strncmp(sd->name, IPU_ISYS_ENTITY_PREFIX,
 			    strlen(IPU_ISYS_ENTITY_PREFIX)) != 0 ||
@@ -1978,6 +2086,9 @@ static const struct v4l2_ioctl_ops ioctl_ops_mplane = {
 	.vidioc_enum_input = vidioc_enum_input,
 	.vidioc_g_input = vidioc_g_input,
 	.vidioc_s_input = vidioc_s_input,
+	.vidioc_g_parm = ipu_isys_get_parm,
+	.vidioc_s_parm = ipu_isys_set_parm,
+
 };
 
 static const struct media_entity_operations entity_ops = {

@@ -1806,6 +1806,49 @@ static int ds5_set_calibration_data(struct ds5 *state, struct hwm_cmd *cmd, u16 
 	return -EINVAL;
 }
 
+static int ds5_s_state(struct ds5 *state, int vc)
+{
+	int ret = 0;
+	dev_info(&state->client->dev, "%s(): set state for vc: %d\n", __func__, vc);
+
+	switch (vc)
+	{
+	case 0:
+		state->is_depth = 1;
+		state->is_rgb = 0;
+		state->is_y8 = 0;
+		state->is_imu = 0;
+		dev_info(&state->client->dev, "%s(): state->is_depth %d\n", __func__, state->is_depth);
+		break;
+	case 1:
+		state->is_depth = 0;
+		state->is_rgb = 1;
+		state->is_y8 = 0;
+		state->is_imu = 0;
+		dev_info(&state->client->dev, "%s(): state->is_rgb %d\n", __func__, state->is_rgb);
+		break;
+	case 2:
+		state->is_depth = 0;
+		state->is_rgb = 0;
+		state->is_y8 = 1;
+		state->is_imu = 0;
+		dev_info(&state->client->dev, "%s(): state->is_y8 %d\n", __func__, state->is_y8);
+		break;
+	case 3:
+		state->is_depth = 0;
+		state->is_rgb = 0;
+		state->is_y8 = 0;
+		state->is_imu = 1;
+		dev_info(&state->client->dev, "%s(): state->is_imu %d\n", __func__, state->is_imu);
+		break;
+	default:
+		dev_warn(&state->client->dev, "%s(): unknown vc: %d\n", __func__, vc);
+		ret = -EINVAL;
+		break;
+	}
+	return ret;
+}
+
 static int ds5_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct ds5 *state = container_of(ctrl->handler, struct ds5,
@@ -1823,6 +1866,10 @@ static int ds5_s_ctrl(struct v4l2_ctrl *ctrl)
 		return ret;
 
 	v4l2_dbg(1, 1, sd, "ctrl: %s, value: %d\n", ctrl->name, ctrl->val);
+	dev_info(&state->client->dev, "%s(): state->is_rgb %d\n", __func__, state->is_rgb);
+	dev_info(&state->client->dev, "%s(): state->is_depth %d\n", __func__, state->is_depth);
+	dev_info(&state->client->dev, "%s(): state->is_y8 %d\n", __func__, state->is_y8);
+	dev_info(&state->client->dev, "%s(): state->is_imu %d\n", __func__, state->is_imu);
 
 	mutex_lock(&state->lock);
 
@@ -1997,6 +2044,10 @@ static int ds5_s_ctrl(struct v4l2_ctrl *ctrl)
 		dev_info(&state->client->dev, "V4L2_CID_IPU_SET_SUB_STREAM %x\n", val);
 		vc_id = (val >> 8) & 0x00FF;
 		on = val & 0x00FF;
+		if (on == 0xff) {
+			ret = ds5_s_state(state, vc_id);
+			break;
+		}
 		if (vc_id > NR_OF_DS5_STREAMS - 1)
 			dev_err(&state->client->dev, "invalid vc %d\n", vc_id);
 		else
@@ -2089,6 +2140,10 @@ static int ds5_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 	unsigned int i;
 	u32 data;
 	int ret = 0;
+	dev_info(&state->client->dev, "%s(): state->is_rgb %d\n", __func__, state->is_rgb);
+	dev_info(&state->client->dev, "%s(): state->is_depth %d\n", __func__, state->is_depth);
+	dev_info(&state->client->dev, "%s(): state->is_y8 %d\n", __func__, state->is_y8);
+	dev_info(&state->client->dev, "%s(): state->is_imu %d\n", __func__, state->is_imu);
 
 	switch (ctrl->id) {
 	case DS5_CAMERA_CID_LOG:
@@ -4295,4 +4350,4 @@ module_i2c_driver(ds5_i2c_driver);
 MODULE_DESCRIPTION("Intel D4XX camera driver");
 MODULE_AUTHOR("Guennadi Liakhovetski (guennadi.liakhovetski@intel.com)");
 MODULE_LICENSE("GPL v2");
-MODULE_VERSION("0.16.1.0");
+MODULE_VERSION("0.16.1.0.a");
