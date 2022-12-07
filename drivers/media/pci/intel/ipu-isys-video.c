@@ -166,7 +166,6 @@ static int media_pipeline_enumerate_by_vc(struct ipu_isys_video *av)
 
 	media_graph_walk_start(&pipe->graph, entity);
 	while ((entity = media_graph_walk_next(graph))) {
-		// printk("%s, %d DIMA media_graph_walk_next vc[%d]\n", __func__, __LINE__, ip->vc);
 		/*
 		 * If entity's pipe is not null and it is video device, it has
 		 * be enabled.
@@ -186,14 +185,15 @@ static int media_pipeline_enumerate_by_vc(struct ipu_isys_video *av)
 		
 		ret = v4l2_g_ctrl(sd->ctrl_handler, &ct);
 	
-		printk("%s, %d V4L2_CID_IPU_QUERY_SUB_STREAM v4l2_g_ctrl for %s vc[%d] ret=%d, value=%d\n",
-			__func__, __LINE__, sd->name, ip->vc, ret, ct.value);
+		printk("%s, %d V4L2_CID_IPU_QUERY_SUB_STREAM v4l2_g_ctrl for %s vc[%d] ret=%d, value=%d pad_id=%d\n",
+			__func__, __LINE__, sd->name, ip->vc, ret, ct.value, (pad_id - NR_OF_CSI2_BE_SOC_SINK_PADS));
 		if (ret)
 			continue;
 	
-		if (ct.value == ip->vc) {
-			printk("%s, %d V4L2_CID_IPU_QUERY_SUB_STREAM v4l2_ctrl_add_handler for %s vc[%d]\n",
-				__func__, __LINE__, sd->name, ip->vc);
+		// if (ct.value == ip->vc) {
+		if (ct.value >= 0 && ip->asv[ct.value].substream == (pad_id - NR_OF_CSI2_BE_SOC_SINK_PADS)) {
+			printk("%s, %d V4L2_CID_IPU_QUERY_SUB_STREAM v4l2_ctrl_add_handler for %s vc[%d], pad_id=%d\n",
+				__func__, __LINE__, sd->name, ip->vc, (pad_id - NR_OF_CSI2_BE_SOC_SINK_PADS));
 			v4l2_ctrl_add_handler(&av->ctrl_handler,
 							  sd->ctrl_handler, NULL, true);
 		}

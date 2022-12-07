@@ -1873,7 +1873,7 @@ static int ds5_s_ctrl(struct v4l2_ctrl *ctrl)
 	u16 vc_id;
 
 	if (sensor) {
-		printk("SENSOR PAD %d\n", sensor->mux_pad);
+		// printk("SENSOR PAD %d\n", sensor->mux_pad);
 		switch (sensor->mux_pad) {
 		case DS5_MUX_PAD_DEPTH_A:
 			state = container_of(ctrl->handler, struct ds5, ctrls.handler_depth);
@@ -2191,7 +2191,7 @@ static int ds5_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 		// printk("sensor %p\n", sensor);
 
 	if (sensor) {
-		printk("SENSOR PAD %d\n", sensor->mux_pad);
+		// printk("SENSOR PAD %d\n", sensor->mux_pad);
 		switch (sensor->mux_pad) {
 		case DS5_MUX_PAD_DEPTH_A:
 			state = container_of(ctrl->handler, struct ds5, ctrls.handler_depth);
@@ -2316,9 +2316,10 @@ static int ds5_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_IPU_QUERY_SUB_STREAM: {
 		if (sensor) {
 			int vc_id = get_sub_stream_vc_id(pad_to_substream[sensor->mux_pad]);
-			printk("%s(): V4L2_CID_IPU_QUERY_SUB_STREAM sensor->mux_pad:%d vc:[%d]\n", __func__, sensor->mux_pad, vc_id);
-			*ctrl->p_new.p_s32 = vc_id;
+			dev_info(sensor->sd.dev, "%s(): V4L2_CID_IPU_QUERY_SUB_STREAM sensor->mux_pad:%d vc:[%d]\n", __func__, sensor->mux_pad, vc_id);
+			// *ctrl->p_new.p_s32 = vc_id;
 			// *ctrl->p_new.p_s32 = sensor->mux_pad-1;
+			*ctrl->p_new.p_s32 = pad_to_substream[sensor->mux_pad];
 			}
 			else {
 				/* we are in DS5 MUX case */
