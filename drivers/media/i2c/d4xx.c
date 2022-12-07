@@ -319,6 +319,9 @@ struct __fw_status {
 
 struct ds5_ctrls {
 	struct v4l2_ctrl_handler handler;
+	struct v4l2_ctrl_handler handler_depth;
+	struct v4l2_ctrl_handler handler_rgb;
+	struct v4l2_ctrl_handler handler_y8;
 	struct {
 		struct v4l2_ctrl *log;
 		struct v4l2_ctrl *fw_version;
@@ -598,6 +601,14 @@ static void set_sub_stream_vc_id(int index, u32 vc_id)
        val &= 0xFF;
        d4xx_query_sub_stream[index] &= 0x00FFFFFFFFFFFFFF;
        d4xx_query_sub_stream[index] |= val << 56;
+}
+
+static int get_sub_stream_vc_id(int index)
+{
+       s64 val = 0;
+	   val = d4xx_query_sub_stream[index] >> 56;
+       val &= 0xFF;
+       return (int)val;
 }
 
 static u8 d4xx_set_sub_stream[] = {
@@ -1854,11 +1865,46 @@ static int ds5_s_ctrl(struct v4l2_ctrl *ctrl)
 	struct ds5 *state = container_of(ctrl->handler, struct ds5,
 					 ctrls.handler);
 	struct v4l2_subdev *sd = &state->mux.sd.subdev;
+	struct ds5_sensor *sensor = (struct ds5_sensor *)ctrl->priv;
 	int ret = -EINVAL;
 	u16 base = DS5_DEPTH_CONTROL_BASE;
 	u32 val;
 	u16 on;
 	u16 vc_id;
+
+	if (sensor) {
+		printk("SENSOR PAD %d\n", sensor->mux_pad);
+		switch (sensor->mux_pad) {
+		case DS5_MUX_PAD_DEPTH_A:
+			state = container_of(ctrl->handler, struct ds5, ctrls.handler_depth);
+			state->is_rgb = 0;
+			state->is_depth = 1;
+			state->is_y8 = 0;
+			state->is_imu = 0;
+		break;
+		case DS5_MUX_PAD_RGB_A:
+			state = container_of(ctrl->handler, struct ds5, ctrls.handler_rgb);
+			state->is_rgb = 1;
+			state->is_depth = 0;
+			state->is_y8 = 0;
+			state->is_imu = 0;
+		break;
+		case DS5_MUX_PAD_MOTION_T_A:
+			state = container_of(ctrl->handler, struct ds5, ctrls.handler_y8);
+			state->is_rgb = 0;
+			state->is_depth = 0;
+			state->is_y8 = 1;
+			state->is_imu = 0;
+		break;
+		default:
+			state->is_rgb = 0;
+			state->is_depth = 0;
+			state->is_y8 = 0;
+			state->is_imu = 1;
+		break;
+
+		}
+	}
 
 	if (state->is_rgb)
 		base = DS5_RGB_CONTROL_BASE;
@@ -2140,6 +2186,45 @@ static int ds5_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 	unsigned int i;
 	u32 data;
 	int ret = 0;
+	struct ds5_sensor *sensor = (struct ds5_sensor *)ctrl->priv;
+		// printk("state %p ctrl->id: %d\n", state, ctrl->id);
+		// printk("sensor %p\n", sensor);
+
+	if (sensor) {
+		printk("SENSOR PAD %d\n", sensor->mux_pad);
+		switch (sensor->mux_pad) {
+		case DS5_MUX_PAD_DEPTH_A:
+			state = container_of(ctrl->handler, struct ds5, ctrls.handler_depth);
+			state->is_rgb = 0;
+			state->is_depth = 1;
+			state->is_y8 = 0;
+			state->is_imu = 0;
+		break;
+		case DS5_MUX_PAD_RGB_A:
+			state = container_of(ctrl->handler, struct ds5, ctrls.handler_rgb);
+			state->is_rgb = 1;
+			state->is_depth = 0;
+			state->is_y8 = 0;
+			state->is_imu = 0;
+		break;
+		case DS5_MUX_PAD_MOTION_T_A:
+			state = container_of(ctrl->handler, struct ds5, ctrls.handler_y8);
+			state->is_rgb = 0;
+			state->is_depth = 0;
+			state->is_y8 = 1;
+			state->is_imu = 0;
+		break;
+		default:
+			state->is_rgb = 0;
+			state->is_depth = 0;
+			state->is_y8 = 0;
+			state->is_imu = 1;
+		break;
+
+		}
+	}
+		// printk("state2 %p\n", state);
+
 	dev_info(&state->client->dev, "%s(): state->is_rgb %d\n", __func__, state->is_rgb);
 	dev_info(&state->client->dev, "%s(): state->is_depth %d\n", __func__, state->is_depth);
 	dev_info(&state->client->dev, "%s(): state->is_y8 %d\n", __func__, state->is_y8);
@@ -2226,6 +2311,19 @@ static int ds5_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 					__func__,
 					*(ctrl->p_new.p_s32));
 		devm_kfree(&state->client->dev, ae_setpoint_cmd);
+		}
+		break;
+	case V4L2_CID_IPU_QUERY_SUB_STREAM: {
+		if (sensor) {
+			int vc_id = get_sub_stream_vc_id(pad_to_substream[sensor->mux_pad]);
+			printk("%s(): V4L2_CID_IPU_QUERY_SUB_STREAM sensor->mux_pad:%d vc:[%d]\n", __func__, sensor->mux_pad, vc_id);
+			*ctrl->p_new.p_s32 = vc_id;
+			// *ctrl->p_new.p_s32 = sensor->mux_pad-1;
+			}
+			else {
+				/* we are in DS5 MUX case */
+				*ctrl->p_new.p_s32 = -1;
+			}
 		}
 		break;
 	}
@@ -2490,50 +2588,66 @@ static const struct v4l2_subdev_internal_ops ds5_sensor_internal_ops = {
 	.close = ds5_mux_close,
 };
 
-static int ds5_ctrl_init(struct ds5 *state)
+static int ds5_ctrl_init(struct ds5 *state, int sid)
 {
 	const struct v4l2_ctrl_ops *ops = &ds5_ctrl_ops;
 	struct ds5_ctrls *ctrls = &state->ctrls;
 	struct v4l2_ctrl_handler *hdl = &ctrls->handler;
 	struct v4l2_subdev *sd = &state->mux.sd.subdev;
 	int ret;
+	struct ds5_sensor *sensor = NULL;
 
-	dev_info(NULL, "%s(), line %d\n", __func__, __LINE__);
+	switch( sid ) {
+		case 0:
+		hdl = &ctrls->handler_depth;
+		sensor = &state->depth.sensor;
+		break;
+		case 1:
+		hdl = &ctrls->handler_rgb;
+		sensor = &state->rgb.sensor;
+		break;
+		case 2:
+		hdl = &ctrls->handler_y8;
+		sensor = &state->motion_t.sensor;
+		break;
+		default:
+		hdl = &ctrls->handler;
+		sensor = NULL;
+		break;
+	}
+
+	dev_info(NULL, "%s(), line %d sid: %d\n", __func__, __LINE__, sid);
 	ret = v4l2_ctrl_handler_init(hdl, DS5_N_CONTROLS);
 	if (ret < 0) {
 		v4l2_err(sd, "cannot init ctrl handler (%d)\n", ret);
 		return ret;
 	}
-
-	ctrls->log = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_log, NULL);
-	ctrls->fw_version = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_fw_version, NULL);
-	ctrls->gvd = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_gvd, NULL);
-	ctrls->get_depth_calib = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_get_depth_calib, NULL);
-	ctrls->set_depth_calib = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_set_depth_calib, NULL);
-	ctrls->get_coeff_calib = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_get_coeff_calib, NULL);
-	ctrls->set_coeff_calib = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_set_coeff_calib, NULL);
-	ctrls->ae_roi_get = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_ae_roi_get, NULL);
-	ctrls->ae_roi_set = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_ae_roi_set, NULL);
-	ctrls->ae_setpoint_get = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_ae_setpoint_get, NULL);
-	ctrls->ae_setpoint_set = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_ae_setpoint_set, NULL);
-	ctrls->erb = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_erb, NULL);
-	ctrls->ewb = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_ewb, NULL);
-	ctrls->hwmc = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_hwmc, NULL);
+if (sid >= 0) {
+	ctrls->log = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_log, sensor);
+	ctrls->fw_version = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_fw_version, sensor);
+	ctrls->gvd = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_gvd, sensor);
+	ctrls->get_depth_calib = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_get_depth_calib, sensor);
+	ctrls->set_depth_calib = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_set_depth_calib, sensor);
+	ctrls->get_coeff_calib = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_get_coeff_calib, sensor);
+	ctrls->set_coeff_calib = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_set_coeff_calib, sensor);
+	ctrls->ae_roi_get = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_ae_roi_get, sensor);
+	ctrls->ae_roi_set = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_ae_roi_set, sensor);
+	ctrls->ae_setpoint_get = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_ae_setpoint_get, sensor);
+	ctrls->ae_setpoint_set = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_ae_setpoint_set, sensor);
+	ctrls->erb = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_erb, sensor);
+	ctrls->ewb = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_ewb, sensor);
+	ctrls->hwmc = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_hwmc, sensor);
 
 	// TODO: wait for decision from FW if to replace with one control
 	//       should report as cluster?
-	ctrls->laser_power = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_laser_power, NULL);
-	ctrls->manual_laser_power = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_manual_laser_power, NULL);
+	ctrls->laser_power = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_laser_power, sensor);
+	ctrls->manual_laser_power = v4l2_ctrl_new_custom(hdl, &ds5_ctrl_manual_laser_power, sensor);
 
 	/* Total gain */
 		ctrls->gain = v4l2_ctrl_new_std(hdl, ops,
 						V4L2_CID_ANALOGUE_GAIN,
 						16, 248, 1, 16);
-
-	ctrls->link_freq = v4l2_ctrl_new_custom(hdl, &d4xx_controls_link_freq, NULL);
-	dev_info(sd->dev, "%s(): %p\n", __func__, ctrls->link_freq);
-	if (ctrls->link_freq)
-	    ctrls->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+	ctrls->gain->priv = sensor;
 
 	ctrls->auto_exp = v4l2_ctrl_new_std_menu(hdl, ops,
 				V4L2_CID_EXPOSURE_AUTO,
@@ -2541,14 +2655,21 @@ static int ds5_ctrl_init(struct ds5 *state)
 				~((1 << V4L2_EXPOSURE_MANUAL) |
 				  (1 << V4L2_EXPOSURE_APERTURE_PRIORITY)),
 				V4L2_EXPOSURE_APERTURE_PRIORITY);
-
+	ctrls->auto_exp->priv = sensor;
 	/* Exposure time: V4L2_CID_EXPOSURE_ABSOLUTE unit: 100 us. */
-		ctrls->exposure = v4l2_ctrl_new_std(hdl, ops,
+	ctrls->exposure = v4l2_ctrl_new_std(hdl, ops,
 					V4L2_CID_EXPOSURE_ABSOLUTE,
 					1, MAX_DEPTH_EXP, 1, DEF_DEPTH_EXP);
-
-	ctrls->query_sub_stream = v4l2_ctrl_new_custom(hdl, &d4xx_controls_q_sub_stream, NULL);
-	ctrls->set_sub_stream = v4l2_ctrl_new_custom(hdl, &d4xx_controls_s_sub_stream, NULL);
+	ctrls->exposure->priv = sensor;
+}
+	ctrls->link_freq = v4l2_ctrl_new_custom(hdl, &d4xx_controls_link_freq, sensor);
+	dev_info(sd->dev, "%s(): %p\n", __func__, ctrls->link_freq);
+	if (ctrls->link_freq)
+	    ctrls->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+	ctrls->query_sub_stream = v4l2_ctrl_new_custom(hdl, &d4xx_controls_q_sub_stream, sensor);
+	ctrls->query_sub_stream->flags |=
+				V4L2_CTRL_FLAG_VOLATILE | V4L2_CTRL_FLAG_EXECUTE_ON_WRITE;
+	ctrls->set_sub_stream = v4l2_ctrl_new_custom(hdl, &d4xx_controls_s_sub_stream, sensor);
 	dev_info(NULL, "%s(), line %d\n", __func__, __LINE__);
 	if (hdl->error) {
 		v4l2_err(sd, "error creating controls (%d)\n", hdl->error);
@@ -2558,9 +2679,25 @@ static int ds5_ctrl_init(struct ds5 *state)
 	}
 
 	// TODO: consider invoking v4l2_ctrl_handler_setup(hdl);
-
-	state->mux.sd.subdev.ctrl_handler = hdl;
-
+	switch( sid ) {
+		case 0:
+		state->depth.sensor.sd.ctrl_handler = hdl;
+		dev_info(state->depth.sensor.sd.dev, "%s():%d set ctrl_handler pad:%d\n", __func__, __LINE__, state->depth.sensor.mux_pad);
+		break;
+		case 1:
+		state->rgb.sensor.sd.ctrl_handler = hdl;
+		dev_info(state->rgb.sensor.sd.dev, "%s():%d set ctrl_handler pad:%d\n", __func__, __LINE__, state->rgb.sensor.mux_pad);
+		break;
+		case 2:
+		state->motion_t.sensor.sd.ctrl_handler = hdl;
+		dev_info(state->motion_t.sensor.sd.dev, "%s():%d set ctrl_handler pad:%d\n", __func__, __LINE__, state->motion_t.sensor.mux_pad);
+		break;
+		default:
+		state->mux.sd.subdev.ctrl_handler = hdl;
+		dev_info(state->mux.sd.subdev.dev, "%s():%d set ctrl_handler for MUX\n", __func__, __LINE__);
+		break;
+	}
+	
 	dev_info(NULL, "%s(), line %d\n", __func__, __LINE__);
 	return 0;
 }
@@ -3562,7 +3699,20 @@ static int ds5_mux_init(struct i2c_client *c, struct ds5 *state)
 		return ret;
 
 	// FIXME: this is most likely different for depth and motion detection
-	ret = ds5_ctrl_init(state);
+	/*set for mux*/
+	ret = ds5_ctrl_init(state, -1);
+	if (ret < 0)
+		return ret;
+	/*set for depth*/
+	ret = ds5_ctrl_init(state, 0);
+	if (ret < 0)
+		return ret;
+	/*set for rgb*/
+	ret = ds5_ctrl_init(state, 1);
+	if (ret < 0)
+		return ret;
+	/*set for y8*/
+	ret = ds5_ctrl_init(state, 2);
 	if (ret < 0)
 		return ret;
 

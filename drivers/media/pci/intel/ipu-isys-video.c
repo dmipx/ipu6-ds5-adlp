@@ -135,46 +135,38 @@ static int ipu_isys_query_sensor_info(struct media_pad *source_pad,
 static int media_pipeline_enumerate_by_vc(struct ipu_isys_video *av)
 {
 	int ret = -ENOLINK;
-	int i;
-	int entity_vc = INVALIA_VC_ID;
-	u32 n;
-	struct ipu_isys_pipeline ipx;
-	struct media_pipeline *pipe = &ipx.pipe;
+	int mutex_locked = 0;
+	struct ipu_isys_pipeline *ip = kmalloc(sizeof(struct ipu_isys_pipeline), 128);
+	struct media_pipeline *pipe = &ip->pipe;
 	struct media_entity *entity = &av->vdev.entity;
 	struct media_device *mdev = entity->graph_obj.mdev;
 	struct media_graph *graph = &pipe->graph;
-	struct media_entity *entity_err = entity;
-	struct media_link *link;
-	struct ipu_isys_pipeline *ip = &ipx;
 	struct media_pad *source_pad = media_entity_remote_pad(&av->pad);
 	unsigned int pad_id;
 	struct v4l2_subdev *sd;
-	/* setting vc state */
-	struct v4l2_ext_control c = {.id = V4L2_CID_IPU_SET_SUB_STREAM, };
-	struct v4l2_ext_controls cs = {.count = 1,
-		.controls = &c,
-	};
+	struct v4l2_control ct = {.id = V4L2_CID_IPU_QUERY_SUB_STREAM, };
 
 	if (!source_pad) {
 		dev_err(entity->graph_obj.mdev->dev, "no remote pad found\n");
 		return ret;
 	}
 	pad_id = source_pad->index;
-	mutex_lock(&mdev->graph_mutex);
+	mutex_locked = mutex_trylock(&mdev->graph_mutex);
 
 	ret = media_graph_walk_init(&pipe->graph, mdev);
-		if (ret)
-			goto error_graph_walk_start;
+	if (ret)
+		goto error_graph_walk_start_enum;
 
 	ret = ipu_isys_query_sensor_info(source_pad, ip);
 	if (ret) {
 		dev_err(entity->graph_obj.mdev->dev,
 			"query sensor info failed\n");
-		return ret;
+		goto error_graph_walk_start_enum;
 	}
 
 	media_graph_walk_start(&pipe->graph, entity);
 	while ((entity = media_graph_walk_next(graph))) {
+		// printk("%s, %d DIMA media_graph_walk_next vc[%d]\n", __func__, __LINE__, ip->vc);
 		/*
 		 * If entity's pipe is not null and it is video device, it has
 		 * be enabled.
@@ -191,24 +183,28 @@ static int media_pipeline_enumerate_by_vc(struct ipu_isys_video *av)
 			continue;
 		if (!strlen(sd->name))
 			continue;
-		printk("%s, %d DIMA v4l2_ctrl_add_handler for %s vc[%d]\n", __func__, __LINE__, sd->name, ip->vc);
-		v4l2_ctrl_add_handler(&av->ctrl_handler,
+		
+		ret = v4l2_g_ctrl(sd->ctrl_handler, &ct);
+	
+		printk("%s, %d V4L2_CID_IPU_QUERY_SUB_STREAM v4l2_g_ctrl for %s vc[%d] ret=%d, value=%d\n",
+			__func__, __LINE__, sd->name, ip->vc, ret, ct.value);
+		if (ret)
+			continue;
+	
+		if (ct.value == ip->vc) {
+			printk("%s, %d V4L2_CID_IPU_QUERY_SUB_STREAM v4l2_ctrl_add_handler for %s vc[%d]\n",
+				__func__, __LINE__, sd->name, ip->vc);
+			v4l2_ctrl_add_handler(&av->ctrl_handler,
 							  sd->ctrl_handler, NULL, true);
-		printk("%s, %d DIMA set vc state for %s vc[%d]\n", __func__, __LINE__, sd->name, ip->vc);
-		c.value64 = SUB_STREAM_SET_VALUE(ip->vc, 0xff);
-		v4l2_s_ext_ctrls(NULL, sd->ctrl_handler,
-						 sd->devnode,
-						 sd->v4l2_dev->mdev,
-						 &cs);
+		}
 	}
+	ret = 0;
+error_graph_walk_start_enum:
+	// printk("%s, %d DIMA media_graph_walk_cleanup vc[%d]\n", __func__, __LINE__, ip->vc);
 	media_graph_walk_cleanup(graph);
-	mutex_unlock(&mdev->graph_mutex);
-
-	return 0;
-error_graph_walk_start:
-	media_graph_walk_cleanup(graph);
-	mutex_unlock(&mdev->graph_mutex);
-
+	if (mutex_locked)
+		mutex_unlock(&mdev->graph_mutex);
+	kfree(ip);
 	return ret;
 }
 
@@ -245,12 +241,13 @@ static int video_open(struct file *file)
 		goto out_v4l2_fh_release;
 
 	mutex_lock(&isys->mutex);
-/*** DIMA XXX */
-// #if 0
+// /*** DIMA XXX */
+// // #if 0
 	if (media_entity_remote_pad(&av->pad)) {
+		printk("%s, %d DIMA media_pipeline_enumerate_by_vc\n", __func__, __LINE__);
 		media_pipeline_enumerate_by_vc(av);
 	}
-// #endif
+// // #endif
 	if (isys->video_opened++) {
 		/* Already open */
 		mutex_unlock(&isys->mutex);
@@ -2107,6 +2104,44 @@ static const struct v4l2_file_operations isys_fops = {
 	.release = video_release,
 };
 
+static int ipu_isys_video_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct ipu_isys_video *av = ctrl->priv;
+		struct ipu_isys *isys = av->isys;
+	mutex_lock(&isys->mutex);
+
+	switch (ctrl->id) {
+		case V4L2_CID_IPU_ENUMERATE_LINK:
+		printk("%s, %d DIMA \n", __func__, __LINE__);
+		/*** DIMA XXX */
+// #if 0
+	if (media_entity_remote_pad(&av->pad)) {
+		printk("%s, %d DIMA media_pipeline_enumerate_by_vc\n", __func__, __LINE__);
+		// media_pipeline_enumerate_by_vc(av);
+	}
+// #endif
+		break;
+	}
+			mutex_unlock(&isys->mutex);
+
+	return 0;
+}
+static const struct v4l2_ctrl_ops ipu_isys_video_ctrl_ops = {
+	.s_ctrl	= ipu_isys_video_s_ctrl,
+	// .g_volatile_ctrl = ipu_isys_video_g_volatile_ctrl,
+};
+
+static const struct v4l2_ctrl_config ipu_isys_video_enum_link = {
+	.ops = &ipu_isys_video_ctrl_ops,
+	.id = V4L2_CID_IPU_ENUMERATE_LINK,
+	.name = "Enumerate graph link",
+	.type = V4L2_CTRL_TYPE_BOOLEAN,
+	.min = 0,
+	.max = 1,
+	.step = 1,
+	.def = 0,
+};
+
 /*
  * Do everything that's needed to initialise things related to video
  * buffer queue, video node, and the related media entity. The caller
@@ -2198,6 +2233,10 @@ int ipu_isys_video_init(struct ipu_isys_video *av,
 	}
 
 	av->pfmt = av->try_fmt_vid_mplane(av, &av->mpix);
+	/* create controls */
+	if (av->vdev.ctrl_handler) {
+		v4l2_ctrl_new_custom(&av->ctrl_handler, &ipu_isys_video_enum_link, av);
+	}
 
 	mutex_unlock(&av->mutex);
 
