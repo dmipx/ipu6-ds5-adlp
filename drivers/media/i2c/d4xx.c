@@ -1617,6 +1617,45 @@ static const struct v4l2_subdev_pad_ops ds5_depth_pad_ops = {
 	.set_fmt		= ds5_sensor_set_fmt,
 };
 
+static int ds5_sensor_g_frame_interval(struct v4l2_subdev *sd,
+		struct v4l2_subdev_frame_interval *fi)
+{
+	struct ds5_sensor *sensor = container_of(sd, struct ds5_sensor, sd);
+
+	if (NULL == sd || NULL == fi)
+		return -EINVAL;
+
+	fi->interval.numerator = 1;
+	fi->interval.denominator = sensor->config.framerate;
+
+	dev_info(sd->dev, "%s(): %s %u\n", __func__, sd->name,
+			fi->interval.denominator);
+
+	return 0;
+}
+static u16 __ds5_probe_framerate(const struct ds5_resolution *res, u16 target);
+
+static int ds5_sensor_s_frame_interval(struct v4l2_subdev *sd,
+		struct v4l2_subdev_frame_interval *fi)
+{
+	struct ds5_sensor *sensor = container_of(sd, struct ds5_sensor, sd);
+	u16 framerate = 1;
+	printk("%s(): 1\n", __func__);
+	if (NULL == sd || NULL == fi || fi->interval.numerator == 0)
+		return -EINVAL;
+
+	printk("%s(): 2\n", __func__);
+	framerate = fi->interval.denominator / fi->interval.numerator;
+	framerate = __ds5_probe_framerate(sensor->config.resolution, framerate);
+	sensor->config.framerate = framerate;
+	fi->interval.numerator = 1;
+	fi->interval.denominator = framerate;
+
+	dev_info(sd->dev, "%s(): %s %u\n", __func__, sd->name, framerate);
+
+	return 0;
+}
+
 static int ds5_sensor_s_stream(struct v4l2_subdev *sd, int on)
 {
 	struct ds5_sensor *sensor = container_of(sd, struct ds5_sensor, sd);
@@ -1629,6 +1668,8 @@ static int ds5_sensor_s_stream(struct v4l2_subdev *sd, int on)
 }
 
 static const struct v4l2_subdev_video_ops ds5_sensor_video_ops = {
+	.g_frame_interval	= ds5_sensor_g_frame_interval,
+	.s_frame_interval	= ds5_sensor_s_frame_interval,
 	.s_stream		= ds5_sensor_s_stream,
 };
 

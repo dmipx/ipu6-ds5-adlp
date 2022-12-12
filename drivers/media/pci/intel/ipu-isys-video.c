@@ -132,7 +132,45 @@ const struct ipu_isys_pixelformat ipu_isys_pfmts_packed[] = {
 static int ipu_isys_query_sensor_info(struct media_pad *source_pad,
 				      struct ipu_isys_pipeline *ip);
 
-static int media_pipeline_enumerate_by_vc(struct ipu_isys_video *av)
+
+static int ipu_isys_inherit_ctrls(struct ipu_isys_video *av,
+								struct v4l2_subdev *sd, void *data)
+{
+	int ret = 0;
+	ret = v4l2_ctrl_add_handler(&av->ctrl_handler,
+						  sd->ctrl_handler, NULL, true);
+	return ret;
+}
+
+static int ipu_isys_get_parm_subdev(struct ipu_isys_video *av,
+								struct v4l2_subdev *sd, void *data)
+{
+	int ret = 0;
+	struct v4l2_subdev_frame_interval *fi = (struct v4l2_subdev_frame_interval *)data;
+	printk("%s, %d for %s\n",
+		__func__, __LINE__, sd->name);
+	ret = v4l2_subdev_call(sd, video, g_frame_interval, fi);
+	return ret;
+}
+
+static int ipu_isys_set_parm_subdev(struct ipu_isys_video *av,
+								struct v4l2_subdev *sd, void *data)
+{
+	int ret = 0;
+	struct v4l2_subdev_frame_interval *fi = (struct v4l2_subdev_frame_interval *)data;
+	printk("%s, %d for %s numerator:%d, denominator:%d\n",
+		__func__, __LINE__, sd->name,
+		fi->interval.numerator, fi->interval.denominator);
+	// ret = v4l2_subdev_call(sd, video, s_frame_interval, fi);
+	ret = sd->ops->video->s_frame_interval(sd, fi);
+	return ret;
+}
+
+static int media_pipeline_enumerate_by_vc_cb(
+		struct ipu_isys_video *av,
+		int (*cb_fn)(struct ipu_isys_video *av, struct v4l2_subdev *sd, void *data),
+		void *data)
+// static int media_pipeline_enumerate_by_vc(struct ipu_isys_video *av)
 {
 	int ret = -ENOLINK;
 	int mutex_locked = 0;
@@ -185,17 +223,18 @@ static int media_pipeline_enumerate_by_vc(struct ipu_isys_video *av)
 		
 		ret = v4l2_g_ctrl(sd->ctrl_handler, &ct);
 	
-		printk("%s, %d V4L2_CID_IPU_QUERY_SUB_STREAM v4l2_g_ctrl for %s vc[%d] ret=%d, value=%d pad_id=%d\n",
-			__func__, __LINE__, sd->name, ip->vc, ret, ct.value, (pad_id - NR_OF_CSI2_BE_SOC_SINK_PADS));
+		// printk("%s, %d V4L2_CID_IPU_QUERY_SUB_STREAM v4l2_g_ctrl for %s vc[%d] ret=%d, value=%d pad_id=%d\n",
+		// 	__func__, __LINE__, sd->name, ip->vc, ret, ct.value, (pad_id - NR_OF_CSI2_BE_SOC_SINK_PADS));
 		if (ret)
 			continue;
 	
 		// if (ct.value == ip->vc) {
 		if (ct.value >= 0 && ip->asv[ct.value].substream == (pad_id - NR_OF_CSI2_BE_SOC_SINK_PADS)) {
-			printk("%s, %d V4L2_CID_IPU_QUERY_SUB_STREAM v4l2_ctrl_add_handler for %s vc[%d], pad_id=%d\n",
-				__func__, __LINE__, sd->name, ip->vc, (pad_id - NR_OF_CSI2_BE_SOC_SINK_PADS));
-			v4l2_ctrl_add_handler(&av->ctrl_handler,
-							  sd->ctrl_handler, NULL, true);
+			// printk("%s, %d V4L2_CID_IPU_QUERY_SUB_STREAM v4l2_ctrl_add_handler for %s vc[%d], pad_id=%d\n",
+			// 	__func__, __LINE__, sd->name, ip->vc, (pad_id - NR_OF_CSI2_BE_SOC_SINK_PADS));
+			// v4l2_ctrl_add_handler(&av->ctrl_handler,
+			// 				  sd->ctrl_handler, NULL, true);
+			cb_fn(av, sd, data);
 		}
 	}
 	ret = 0;
@@ -244,8 +283,7 @@ static int video_open(struct file *file)
 // /*** DIMA XXX */
 // // #if 0
 	if (media_entity_remote_pad(&av->pad)) {
-		printk("%s, %d DIMA media_pipeline_enumerate_by_vc\n", __func__, __LINE__);
-		media_pipeline_enumerate_by_vc(av);
+		media_pipeline_enumerate_by_vc_cb(av, ipu_isys_inherit_ctrls, NULL);
 	}
 // // #endif
 	if (isys->video_opened++) {
@@ -399,21 +437,35 @@ ipu_isys_get_pixelformat(struct ipu_isys_video *av, u32 pixelformat)
 
 static int ipu_isys_get_parm(struct file *file, void *fh, struct v4l2_streamparm *a)
 {
-    // struct ipu_isys_video *av = video_drvdata(file);
+    struct ipu_isys_video *av = video_drvdata(file);
+	struct v4l2_subdev_frame_interval fi;
 
-    a->parm.capture.timeperframe.numerator = 1;
-    a->parm.capture.timeperframe.denominator = 12;
-	printk("%s, %d DIMA YYY\n", __func__, __LINE__);
+	if (media_entity_remote_pad(&av->pad)) {
+		media_pipeline_enumerate_by_vc_cb(av, ipu_isys_get_parm_subdev, &fi);
+	} else {
+		fi.interval.numerator = 1;
+		fi.interval.denominator = 30;
+	}
+
+    a->parm.capture.timeperframe.numerator = fi.interval.numerator;
+    a->parm.capture.timeperframe.denominator = fi.interval.denominator;
 
     return 0;
 }
 
 static int ipu_isys_set_parm(struct file *file, void *fh, struct v4l2_streamparm *a)
 {
-    //    struct ipu_isys_video *av = video_drvdata(file);
-	printk("%s, %d DIMA YYY\n", __func__, __LINE__);
+    struct ipu_isys_video *av = video_drvdata(file);
+	struct v4l2_subdev_frame_interval fi;
+	int ret;
+    fi.interval.numerator = a->parm.capture.timeperframe.numerator;
+    fi.interval.denominator = a->parm.capture.timeperframe.denominator;
 
-        return 0;
+	if (media_entity_remote_pad(&av->pad))
+		ret = media_pipeline_enumerate_by_vc_cb(av, ipu_isys_set_parm_subdev, &fi);
+
+
+    return 0;
 }
 
 int ipu_isys_vidioc_querycap(struct file *file, void *fh,
