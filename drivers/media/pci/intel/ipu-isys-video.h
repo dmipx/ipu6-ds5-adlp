@@ -153,7 +153,7 @@ struct ipu_isys_video {
 	unsigned int ts_offsets[VIDEO_MAX_PLANES];
 	unsigned int line_header_length;	/* bits */
 	unsigned int line_footer_length;	/* bits */
-
+	unsigned int enum_link_state; /* state for link enumeration by vc */
 #if defined(IPU_IWAKE_ENABLE)
 	struct video_stream_watermark *watermark;
 #endif

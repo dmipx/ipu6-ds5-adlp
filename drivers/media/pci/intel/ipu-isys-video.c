@@ -129,9 +129,14 @@ const struct ipu_isys_pixelformat ipu_isys_pfmts_packed[] = {
 	{}
 };
 
+enum ipu_isys_enum_link_state {
+	IPU_ISYS_LINK_STATE_DISABLED = 0,
+	IPU_ISYS_LINK_STATE_ENABLED = 1,
+	IPU_ISYS_LINK_STATE_DONE = 2,
+};
+
 static int ipu_isys_query_sensor_info(struct media_pad *source_pad,
 				      struct ipu_isys_pipeline *ip);
-
 
 static int ipu_isys_inherit_ctrls(struct ipu_isys_video *av,
 								struct v4l2_subdev *sd, void *data)
@@ -146,9 +151,8 @@ static int ipu_isys_get_parm_subdev(struct ipu_isys_video *av,
 								struct v4l2_subdev *sd, void *data)
 {
 	int ret = 0;
-	struct v4l2_subdev_frame_interval *fi = (struct v4l2_subdev_frame_interval *)data;
-	printk("%s, %d for %s\n",
-		__func__, __LINE__, sd->name);
+	struct v4l2_subdev_frame_interval *fi =
+			(struct v4l2_subdev_frame_interval *)data;
 	ret = v4l2_subdev_call(sd, video, g_frame_interval, fi);
 	return ret;
 }
@@ -157,12 +161,12 @@ static int ipu_isys_set_parm_subdev(struct ipu_isys_video *av,
 								struct v4l2_subdev *sd, void *data)
 {
 	int ret = 0;
-	struct v4l2_subdev_frame_interval *fi = (struct v4l2_subdev_frame_interval *)data;
-	printk("%s, %d for %s numerator:%d, denominator:%d\n",
-		__func__, __LINE__, sd->name,
-		fi->interval.numerator, fi->interval.denominator);
+	struct v4l2_subdev_frame_interval *fi =
+			(struct v4l2_subdev_frame_interval *)data;
+	/* v4l2_subdev_call doesn't call, access directly */
 	// ret = v4l2_subdev_call(sd, video, s_frame_interval, fi);
-	ret = sd->ops->video->s_frame_interval(sd, fi);
+	if (sd && sd->ops && sd->ops->video && sd->ops->video->s_frame_interval)
+		ret = sd->ops->video->s_frame_interval(sd, fi);
 	return ret;
 }
 
@@ -170,10 +174,8 @@ static int media_pipeline_enumerate_by_vc_cb(
 		struct ipu_isys_video *av,
 		int (*cb_fn)(struct ipu_isys_video *av, struct v4l2_subdev *sd, void *data),
 		void *data)
-// static int media_pipeline_enumerate_by_vc(struct ipu_isys_video *av)
 {
 	int ret = -ENOLINK;
-	int mutex_locked = 0;
 	struct ipu_isys_pipeline *ip = kmalloc(sizeof(struct ipu_isys_pipeline), 128);
 	struct media_pipeline *pipe = &ip->pipe;
 	struct media_entity *entity = &av->vdev.entity;
@@ -188,8 +190,9 @@ static int media_pipeline_enumerate_by_vc_cb(
 		dev_err(entity->graph_obj.mdev->dev, "no remote pad found\n");
 		return ret;
 	}
+
 	pad_id = source_pad->index;
-	mutex_locked = mutex_trylock(&mdev->graph_mutex);
+	mutex_lock(&mdev->graph_mutex);
 
 	ret = media_graph_walk_init(&pipe->graph, mdev);
 	if (ret)
@@ -212,6 +215,7 @@ static int media_pipeline_enumerate_by_vc_cb(
 			continue;
 
 		sd = media_entity_to_v4l2_subdev(entity);
+		/* pre-filter sub-devices */
 		if (!entity)
 			continue;
 		if (!sd->name)
@@ -222,27 +226,19 @@ static int media_pipeline_enumerate_by_vc_cb(
 			continue;
 		
 		ret = v4l2_g_ctrl(sd->ctrl_handler, &ct);
-	
-		// printk("%s, %d V4L2_CID_IPU_QUERY_SUB_STREAM v4l2_g_ctrl for %s vc[%d] ret=%d, value=%d pad_id=%d\n",
-		// 	__func__, __LINE__, sd->name, ip->vc, ret, ct.value, (pad_id - NR_OF_CSI2_BE_SOC_SINK_PADS));
 		if (ret)
 			continue;
-	
-		// if (ct.value == ip->vc) {
-		if (ct.value >= 0 && ip->asv[ct.value].substream == (pad_id - NR_OF_CSI2_BE_SOC_SINK_PADS)) {
-			// printk("%s, %d V4L2_CID_IPU_QUERY_SUB_STREAM v4l2_ctrl_add_handler for %s vc[%d], pad_id=%d\n",
-			// 	__func__, __LINE__, sd->name, ip->vc, (pad_id - NR_OF_CSI2_BE_SOC_SINK_PADS));
-			// v4l2_ctrl_add_handler(&av->ctrl_handler,
-			// 				  sd->ctrl_handler, NULL, true);
+		/* access only subdevices on same vc */	
+		if (ct.value >= 0 && ip->asv[ct.value].substream ==
+			(pad_id - NR_OF_CSI2_BE_SOC_SINK_PADS)) {
 			cb_fn(av, sd, data);
 		}
 	}
 	ret = 0;
+	av->enum_link_state = IPU_ISYS_LINK_STATE_DONE;
 error_graph_walk_start_enum:
-	// printk("%s, %d DIMA media_graph_walk_cleanup vc[%d]\n", __func__, __LINE__, ip->vc);
 	media_graph_walk_cleanup(graph);
-	if (mutex_locked)
-		mutex_unlock(&mdev->graph_mutex);
+	mutex_unlock(&mdev->graph_mutex);
 	kfree(ip);
 	return ret;
 }
@@ -280,12 +276,12 @@ static int video_open(struct file *file)
 		goto out_v4l2_fh_release;
 
 	mutex_lock(&isys->mutex);
-// /*** DIMA XXX */
-// // #if 0
-	if (media_entity_remote_pad(&av->pad)) {
+
+	if (av->enum_link_state == IPU_ISYS_LINK_STATE_ENABLED && 
+			media_entity_remote_pad(&av->pad)) {
 		media_pipeline_enumerate_by_vc_cb(av, ipu_isys_inherit_ctrls, NULL);
 	}
-// // #endif
+
 	if (isys->video_opened++) {
 		/* Already open */
 		mutex_unlock(&isys->mutex);
@@ -439,33 +435,38 @@ static int ipu_isys_get_parm(struct file *file, void *fh, struct v4l2_streamparm
 {
     struct ipu_isys_video *av = video_drvdata(file);
 	struct v4l2_subdev_frame_interval fi;
+	int ret = -ENOLINK;
 
-	if (media_entity_remote_pad(&av->pad)) {
-		media_pipeline_enumerate_by_vc_cb(av, ipu_isys_get_parm_subdev, &fi);
-	} else {
-		fi.interval.numerator = 1;
-		fi.interval.denominator = 30;
-	}
+	if (av->enum_link_state == IPU_ISYS_LINK_STATE_DISABLED)
+		return -ENOLINK;
+
+	if (media_entity_remote_pad(&av->pad))
+		ret = media_pipeline_enumerate_by_vc_cb(av, ipu_isys_get_parm_subdev, &fi);
+	else
+		return -ENOLINK;
 
     a->parm.capture.timeperframe.numerator = fi.interval.numerator;
     a->parm.capture.timeperframe.denominator = fi.interval.denominator;
 
-    return 0;
+    return ret;
 }
 
 static int ipu_isys_set_parm(struct file *file, void *fh, struct v4l2_streamparm *a)
 {
     struct ipu_isys_video *av = video_drvdata(file);
 	struct v4l2_subdev_frame_interval fi;
-	int ret;
+	int ret = -ENOLINK;
+
+	if (av->enum_link_state == IPU_ISYS_LINK_STATE_DISABLED)
+		return -ENOLINK;
+
     fi.interval.numerator = a->parm.capture.timeperframe.numerator;
     fi.interval.denominator = a->parm.capture.timeperframe.denominator;
 
 	if (media_entity_remote_pad(&av->pad))
 		ret = media_pipeline_enumerate_by_vc_cb(av, ipu_isys_set_parm_subdev, &fi);
 
-
-    return 0;
+    return ret;
 }
 
 int ipu_isys_vidioc_querycap(struct file *file, void *fh,
@@ -2159,28 +2160,21 @@ static const struct v4l2_file_operations isys_fops = {
 static int ipu_isys_video_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct ipu_isys_video *av = ctrl->priv;
-		struct ipu_isys *isys = av->isys;
+	struct ipu_isys *isys = av->isys;
 	mutex_lock(&isys->mutex);
 
 	switch (ctrl->id) {
 		case V4L2_CID_IPU_ENUMERATE_LINK:
-		printk("%s, %d DIMA \n", __func__, __LINE__);
-		/*** DIMA XXX */
-// #if 0
-	if (media_entity_remote_pad(&av->pad)) {
-		printk("%s, %d DIMA media_pipeline_enumerate_by_vc\n", __func__, __LINE__);
-		// media_pipeline_enumerate_by_vc(av);
-	}
-// #endif
+		av->enum_link_state = !!(ctrl->val);
 		break;
 	}
-			mutex_unlock(&isys->mutex);
 
+	mutex_unlock(&isys->mutex);
 	return 0;
 }
+
 static const struct v4l2_ctrl_ops ipu_isys_video_ctrl_ops = {
 	.s_ctrl	= ipu_isys_video_s_ctrl,
-	// .g_volatile_ctrl = ipu_isys_video_g_volatile_ctrl,
 };
 
 static const struct v4l2_ctrl_config ipu_isys_video_enum_link = {
