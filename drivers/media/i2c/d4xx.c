@@ -489,7 +489,7 @@ static int ds5_write_8(struct ds5 *state, u16 reg, u8 val)
 			__func__, ret, reg, val);
 	else
 		if (state->dfu_dev.dfu_state_flag == DS5_DFU_IDLE)
-			dev_info(&state->client->dev, "%s(): i2c write 0x%04x: 0x%x\n",
+			dev_dbg(&state->client->dev, "%s(): i2c write 0x%04x: 0x%x\n",
 				 __func__, reg, val);
 
 	return ret;
@@ -503,7 +503,7 @@ static int ds5_write(struct ds5 *state, u16 reg, u16 val)
 	value[1] = val >> 8;
 	value[0] = val & 0x00FF;
 
-	dev_info(&state->client->dev,
+	dev_dbg(&state->client->dev,
 			"%s(): writing to register: 0x%04x, value1: 0x%x, value2:0x%x\n",
 			__func__, reg, value[1], value[0]);
 
@@ -514,7 +514,7 @@ static int ds5_write(struct ds5 *state, u16 reg, u16 val)
 				__func__, ret, reg, val);
 	else
 		if (state->dfu_dev.dfu_state_flag == DS5_DFU_IDLE)
-			dev_info(&state->client->dev, "%s(): i2c write 0x%04x: 0x%x\n",
+			dev_dbg(&state->client->dev, "%s(): i2c write 0x%04x: 0x%x\n",
 				__func__, reg, val);
 
 	return ret;
@@ -530,7 +530,7 @@ static int ds5_raw_write(struct ds5 *state, u16 reg,
 				__func__, ret, reg, (int)val_len);
 	else
 		if (state->dfu_dev.dfu_state_flag == DS5_DFU_IDLE)
-			dev_info(&state->client->dev,
+			dev_dbg(&state->client->dev,
 					"%s(): i2c raw write 0x%04x: %d bytes\n",
 					__func__, reg, (int)val_len);
 
@@ -545,7 +545,7 @@ static int ds5_read(struct ds5 *state, u16 reg, u16 *val)
 				__func__, ret, reg);
 	else {
 		if (state->dfu_dev.dfu_state_flag == DS5_DFU_IDLE)
-			dev_info(&state->client->dev, "%s(): i2c read 0x%04x: 0x%x\n",
+			dev_dbg(&state->client->dev, "%s(): i2c read 0x%04x: 0x%x\n",
 					__func__, reg, *val);
 	}
 
@@ -889,8 +889,8 @@ static const struct ds5_format ds5_y_formats_ds5u[] = {
 	{
 		/* First format: default */
 		.data_type = 0x1e,	/* Y8 */
-		//.mbus_code = MEDIA_BUS_FMT_SGRBG8_1X8,
-		.mbus_code = MEDIA_BUS_FMT_UYVY8_1X16,
+		.mbus_code = MEDIA_BUS_FMT_SBGGR8_1X8,
+		// .mbus_code = MEDIA_BUS_FMT_UYVY8_1X16,
 		.n_resolutions = ARRAY_SIZE(y8_sizes),
 		.resolutions = y8_sizes,
 	}, {
@@ -962,6 +962,23 @@ static const char *ds5_get_sensor_name(struct ds5 *state)
 	return sensor_name[sensor_id];
 }
 
+static void ds5_set_state_last_set(struct ds5 *state)
+{
+	// dev_info(&state->client->dev, "%s(): %s\n",
+	// 	__func__, ds5_get_sensor_name(state));
+	printk("%s(): %s\n",
+		__func__, ds5_get_sensor_name(state));
+
+	if (state->is_depth)
+		state->mux.last_set = &state->depth.sensor;
+	else if (state->is_rgb)
+		state->mux.last_set = &state->rgb.sensor;
+	else if (state->is_y8)
+		state->mux.last_set = &state->motion_t.sensor;
+	else
+		state->mux.last_set = &state->imu.sensor;
+}
+
 /* This is needed for .get_fmt()
  * and if streaming is started without .set_fmt() */
 static void ds5_sensor_format_init(struct ds5_sensor *sensor)
@@ -1003,7 +1020,8 @@ static int ds5_sensor_enum_mbus_code(struct v4l2_subdev *sd,
 {
 	struct ds5_sensor *sensor = container_of(sd, struct ds5_sensor, sd);
 	//struct ds5_vchan *vchan = sensor->vchan;
-dev_info(sensor->sd.dev, "%s(): sensor %s \n", __func__, sensor->sd.name);
+dev_info(sensor->sd.dev, "%s(): sensor %s pad: %d index: %d\n",
+__func__, sensor->sd.name, mce->pad, mce->index);
 	if (mce->pad)
 		return -EINVAL;
 
@@ -2047,8 +2065,8 @@ static int ds5_s_ctrl(struct v4l2_ctrl *ctrl)
 	else if (state->is_imu)
 		return ret;
 
-	v4l2_dbg(1, 1, sd, "ctrl: %s, value: %d\n", ctrl->name, ctrl->val);
-	dev_info(&state->client->dev, "%s(): %s - ctrl: %s, value: %d\n",
+	v4l2_dbg(3, 1, sd, "ctrl: %s, value: %d\n", ctrl->name, ctrl->val);
+	dev_dbg(&state->client->dev, "%s(): %s - ctrl: %s, value: %d\n",
 		__func__, ds5_get_sensor_name(state), ctrl->name, ctrl->val);
 
 	mutex_lock(&state->lock);
@@ -2450,8 +2468,8 @@ static int ds5_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 	base = (state->is_rgb) ? DS5_RGB_CONTROL_BASE : DS5_DEPTH_CONTROL_BASE;
 		// printk("state2 %p\n", state);
 
-	dev_info(&state->client->dev, "%s(): %s - ctrl: %s \n",
-		__func__, ds5_get_sensor_name(state), ctrl->name);
+	// dev_info(&state->client->dev, "%s(): %s - ctrl: %s \n",
+	// 	__func__, ds5_get_sensor_name(state), ctrl->name);
 
 	switch (ctrl->id) {
 
@@ -2612,7 +2630,7 @@ static int ds5_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_IPU_QUERY_SUB_STREAM: {
 		if (sensor) {
 			int vc_id = get_sub_stream_vc_id(pad_to_substream[sensor->mux_pad]);
-			dev_info(sensor->sd.dev, "%s(): V4L2_CID_IPU_QUERY_SUB_STREAM sensor->mux_pad:%d vc:[%d]\n", __func__, sensor->mux_pad, vc_id);
+			// dev_info(sensor->sd.dev, "%s(): V4L2_CID_IPU_QUERY_SUB_STREAM sensor->mux_pad:%d vc:[%d]\n", __func__, sensor->mux_pad, vc_id);
 			// *ctrl->p_new.p_s32 = vc_id;
 			// *ctrl->p_new.p_s32 = sensor->mux_pad-1;
 			*ctrl->p_new.p_s32 = pad_to_substream[sensor->mux_pad];
