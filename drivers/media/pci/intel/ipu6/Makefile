@@ -5,11 +5,10 @@ ifneq ($(EXTERNAL_BUILD), 1)
 srcpath := $(srctree)
 endif
 
-ccflags-y +=  -DIPU_HAS_S2M -DIPU_TPG_FRAME_SYNC -DIPU_PSYS_GPC \
+ccflags-y += -DIPU_HAS_S2M -DIPU_TPG_FRAME_SYNC -DIPU_PSYS_GPC \
 		-DIPU_ISYS_GPC
-ccflags-y +=  -DI2C_DYNAMIC
+ccflags-y += -DI2C_DYNAMIC
 ccflags-y += -DIPU_ISYS_RESET
-ccflags-y +=
 
 intel-ipu6-objs				+= ../ipu.o \
 					   ../ipu-bus.o \

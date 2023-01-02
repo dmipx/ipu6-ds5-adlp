@@ -221,6 +221,8 @@ struct lt6911uxc_state {
 	u32 thread_run;
 	struct task_struct *poll_task;
 	bool auxiliary_port;
+
+	s64 sub_stream;
 };
 
 static const struct v4l2_event lt6911uxc_ev_source_change = {
@@ -789,7 +791,6 @@ static int lt6911uxc_init_controls(struct lt6911uxc_state *lt6911uxc)
 	struct i2c_client *client = v4l2_get_subdevdata(&lt6911uxc->sd);
 	struct v4l2_ctrl_handler *ctrl_hdlr;
 	s64 hblank;
-	struct v4l2_ctrl_config cfg = { 0 };
 	int ret;
 
 	ctrl_hdlr = &lt6911uxc->ctrl_handler;
@@ -947,11 +948,7 @@ static int lt6911uxc_init_controls(struct lt6911uxc_state *lt6911uxc)
 		return ctrl_hdlr->error;
 	}
 
-	lt6911uxc_q_sub_stream.qmenu_int = devm_kzalloc(&client->dev, sizeof(s64), GFP_KERNEL);
-	if (!lt6911uxc_q_sub_stream.qmenu_int) {
-		dev_dbg(&client->dev, "failed alloc mem for query sub streami.\n");
-		return -ENOMEM;
-	}
+	lt6911uxc_q_sub_stream.qmenu_int = &lt6911uxc->sub_stream;
 	lt6911uxc->query_sub_stream = v4l2_ctrl_new_custom(ctrl_hdlr, &lt6911uxc_q_sub_stream, NULL);
 	if (ctrl_hdlr->error) {
 		dev_dbg(&client->dev, "Set query sub stream ctrl, error = %d.\n",
@@ -1050,18 +1047,25 @@ static int lt6911uxc_g_frame_interval(struct v4l2_subdev *sd,
 }
 
 static int lt6911uxc_set_format(struct v4l2_subdev *sd,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 14, 0)
+			     struct v4l2_subdev_pad_config *cfg,
+#else
 				struct v4l2_subdev_state *sd_state,
+#endif
 			     struct v4l2_subdev_format *fmt)
 {
 	struct lt6911uxc_state *lt6911uxc = to_state(sd);
 	s32 vblank_def;
 	s64 hblank;
-	s64 *sub_stream;
 
 	mutex_lock(&lt6911uxc->mutex);
 	lt6911uxc_update_pad_format(lt6911uxc->cur_mode, &fmt->format);
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 14, 0)
+		*v4l2_subdev_get_try_format(sd, cfg, fmt->pad) = fmt->format;
+#else
 		*v4l2_subdev_get_try_format(sd, sd_state, fmt->pad) = fmt->format;
+#endif
 	} else {
 		__v4l2_ctrl_s_ctrl(lt6911uxc->link_freq,
 			lt6911uxc->cur_mode->link_freq_index);
@@ -1091,27 +1095,35 @@ static int lt6911uxc_set_format(struct v4l2_subdev *sd,
 		else
 			__v4l2_ctrl_s_ctrl(lt6911uxc->frame_interval, 33);
 	}
-	sub_stream = lt6911uxc->query_sub_stream->qmenu_int;
-	set_sub_stream_fmt(sub_stream, fmt->format.code);
-	set_sub_stream_h(sub_stream, fmt->format.height);
-	set_sub_stream_w(sub_stream, fmt->format.width);
-	set_sub_stream_dt(sub_stream, mbus_code_to_mipi(fmt->format.code));
-	set_sub_stream_vc_id(sub_stream, 0);
+	set_sub_stream_fmt(&lt6911uxc->sub_stream, fmt->format.code);
+	set_sub_stream_h(&lt6911uxc->sub_stream, fmt->format.height);
+	set_sub_stream_w(&lt6911uxc->sub_stream, fmt->format.width);
+	set_sub_stream_dt(&lt6911uxc->sub_stream, mbus_code_to_mipi(fmt->format.code));
+	set_sub_stream_vc_id(&lt6911uxc->sub_stream, 0);
 	mutex_unlock(&lt6911uxc->mutex);
 
 	return 0;
 }
 
 static int lt6911uxc_get_format(struct v4l2_subdev *sd,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 14, 0)
+			     struct v4l2_subdev_pad_config *cfg,
+#else
 			     struct v4l2_subdev_state *sd_state,
+#endif
 			     struct v4l2_subdev_format *fmt)
 {
 	struct lt6911uxc_state *lt6911uxc = to_state(sd);
 
 	mutex_lock(&lt6911uxc->mutex);
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 14, 0)
+		fmt->format = *v4l2_subdev_get_try_format(&lt6911uxc->sd, cfg,
+							  fmt->pad);
+#else
 		fmt->format = *v4l2_subdev_get_try_format(&lt6911uxc->sd, sd_state,
 							fmt->pad);
+#endif
 	else
 		lt6911uxc_update_pad_format(lt6911uxc->cur_mode, &fmt->format);
 
@@ -1121,7 +1133,11 @@ static int lt6911uxc_get_format(struct v4l2_subdev *sd,
 }
 
 static int lt6911uxc_enum_mbus_code(struct v4l2_subdev *sd,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 14, 0)
+				 struct v4l2_subdev_pad_config *cfg,
+#else
 				 struct v4l2_subdev_state *sd_state,
+#endif
 				 struct v4l2_subdev_mbus_code_enum *code)
 {
 	struct lt6911uxc_state *lt6911uxc = to_state(sd);
@@ -1131,7 +1147,11 @@ static int lt6911uxc_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int lt6911uxc_enum_frame_size(struct v4l2_subdev *sd,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 14, 0)
+				  struct v4l2_subdev_pad_config *cfg,
+#else
 				  struct v4l2_subdev_state *sd_state,
+#endif
 				  struct v4l2_subdev_frame_size_enum *fse)
 {
 	struct lt6911uxc_state *lt6911uxc = to_state(sd);
@@ -1145,7 +1165,11 @@ static int lt6911uxc_enum_frame_size(struct v4l2_subdev *sd,
 }
 
 static int lt6911uxc_enum_frame_interval(struct v4l2_subdev *sd,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 14, 0)
+		struct v4l2_subdev_pad_config *cfg,
+#else
 		struct v4l2_subdev_state *sd_state,
+#endif
 		struct v4l2_subdev_frame_interval_enum *fie)
 {
 	struct lt6911uxc_state *lt6911uxc = to_state(sd);
@@ -1162,8 +1186,13 @@ static int lt6911uxc_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 
 	if (!lt6911uxc->auxiliary_port)
 		lt6911uxc_set_stream(sd, true);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 14, 0)
+	lt6911uxc_update_pad_format(lt6911uxc->cur_mode,
+			v4l2_subdev_get_try_format(sd, fh->pad, 0));
+#else
 	lt6911uxc_update_pad_format(lt6911uxc->cur_mode,
 			v4l2_subdev_get_try_format(sd, fh->state, 0));
+#endif
 
 	return 0;
 }
@@ -1565,7 +1594,11 @@ static int lt6911uxc_probe(struct i2c_client *client)
 	lt6911uxc->sd.internal_ops = &lt6911uxc_subdev_internal_ops;
 	lt6911uxc->sd.flags |=
 			V4L2_SUBDEV_FL_HAS_DEVNODE | V4L2_SUBDEV_FL_HAS_EVENTS;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 14, 0)
+	ret = v4l2_async_register_subdev_sensor_common(&lt6911uxc->sd);
+#else
 	ret = v4l2_async_register_subdev_sensor(&lt6911uxc->sd);
+#endif
 	if (ret < 0) {
 		dev_err(&client->dev, "failed to register V4L2 subdev: %d",
 			ret);

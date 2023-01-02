@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2013 - 2021 Intel Corporation
+// Copyright (C) 2013 - 2022 Intel Corporation
 
 #include <linux/debugfs.h>
 #include <linux/delay.h>
@@ -14,8 +14,18 @@
 #include <linux/version.h>
 
 #include <media/ipu-isys.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 6, 0)
 #include <media/v4l2-mc.h>
+#endif
 #include <media/v4l2-subdev.h>
+#if !IS_ENABLED(CONFIG_VIDEO_INTEL_IPU_USE_PLATFORMDATA)
+#include <media/v4l2-fwnode.h>
+#include <media/v4l2-ctrls.h>
+#include <media/v4l2-device.h>
+#include <media/v4l2-event.h>
+#include <media/v4l2-ioctl.h>
+#include <media/v4l2-async.h>
+#endif
 #include "ipu.h"
 #include "ipu-bus.h"
 #include "ipu-cpd.h"
@@ -30,6 +40,7 @@
 #include "ipu-platform-buttress-regs.h"
 
 #define ISYS_PM_QOS_VALUE	300
+#if IS_ENABLED(CONFIG_VIDEO_INTEL_IPU_USE_PLATFORMDATA)
 /*
  * The param was passed from module to indicate if port
  * could be optimized.
@@ -37,62 +48,228 @@
 static bool csi2_port_optimized = true;
 module_param(csi2_port_optimized, bool, 0660);
 MODULE_PARM_DESC(csi2_port_optimized, "IPU CSI2 port optimization");
-
-#if defined(IPU_IWAKE_ENABLE)
-#define IPU_BUTTRESS_FABIC_CONTROL	    0x68
-#define GDA_ENABLE_IWAKE_INDEX		    2
-#define GDA_IWAKE_THRESHOLD_INDEX           1
-#define GDA_IRQ_CRITICAL_THRESHOLD_INDEX    0
-
-/* LTR & DID value are 10 bit at most */
-#define LTR_DID_VAL_MAX		1023
-#define LTR_DEFAULT_VALUE	0x70503C19
-#define FILL_TIME_DEFAULT_VALUE 0xFFF0783C
-#define LTR_DID_PKGC_2R		20
-#define LTR_DID_PKGC_8		100
-#define LTR_SCALE_DEFAULT	5
-#define LTR_SCALE_1024NS	2
-#define REG_PKGC_PMON_CFG	0xB00
-
-#define VAL_PKGC_PMON_CFG_RESET 0x38
-#define VAL_PKGC_PMON_CFG_START 0x7
-
-#define IS_PIXEL_BUFFER_PAGES		0x80
-/* BIOS provides the driver the LTR and threshold information in IPU,
- * IS pixel buffer is 256KB, MaxSRAMSize is 200KB on IPU6.
- */
-#define IPU6_MAX_SRAM_SIZE			(200 << 10)
-/* IS pixel buffer is 128KB, MaxSRAMSize is 96KB on IPU6SE.
- */
-#define IPU6SE_MAX_SRAM_SIZE			(96 << 10)
-/* When iwake mode is disabled the critical threshold is statically set to 75%
- * of the IS pixel buffer criticalThreshold = (128 * 3) / 4
- */
-#define CRITICAL_THRESHOLD_IWAKE_DISABLE	(IS_PIXEL_BUFFER_PAGES * 3 / 4)
-
-union fabric_ctrl {
-	struct {
-		u16 ltr_val   : 10;
-		u16 ltr_scale : 3;
-		u16 RSVD1     : 3;
-		u16 did_val   : 10;
-		u16 did_scale : 3;
-		u16 RSVD2     : 1;
-		u16 keep_power_in_D0   : 1;
-		u16 keep_power_override : 1;
-	} bits;
-	u32 value;
-};
-
-enum ltr_did_type {
-	LTR_IWAKE_ON,
-	LTR_IWAKE_OFF,
-	LTR_ISYS_ON,
-	LTR_ISYS_OFF,
-	LTR_TYPE_MAX
-};
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 6, 0)
+/*
+ * BEGIN adapted code from drivers/media/platform/omap3isp/isp.c.
+ * FIXME: This (in terms of functionality if not code) should be most
+ * likely generalised in the framework, and use made optional for
+ * drivers.
+ */
+/*
+ * ipu_pipeline_pm_use_count - Count the number of users of a pipeline
+ * @entity: The entity
+ *
+ * Return the total number of users of all video device nodes in the pipeline.
+ */
+static int ipu_pipeline_pm_use_count(struct media_pad *pad)
+{
+	struct media_entity_graph graph;
+	struct media_entity *entity = pad->entity;
+	int use = 0;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
+	media_graph_walk_init(&graph, entity->graph_obj.mdev);
+#endif
+	media_graph_walk_start(&graph, pad);
+
+	while ((entity = media_graph_walk_next(&graph))) {
+		if (is_media_entity_v4l2_io(entity))
+			use += entity->use_count;
+	}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
+	media_graph_walk_cleanup(&graph);
+#endif
+	return use;
+}
+
+/*
+ * ipu_pipeline_pm_power_one - Apply power change to an entity
+ * @entity: The entity
+ * @change: Use count change
+ *
+ * Change the entity use count by @change. If the entity is a subdev update its
+ * power state by calling the core::s_power operation when the use count goes
+ * from 0 to != 0 or from != 0 to 0.
+ *
+ * Return 0 on success or a negative error code on failure.
+ */
+static int ipu_pipeline_pm_power_one(struct media_entity *entity, int change)
+{
+	struct v4l2_subdev *subdev;
+	int ret;
+
+	subdev = is_media_entity_v4l2_subdev(entity)
+	    ? media_entity_to_v4l2_subdev(entity) : NULL;
+
+	if (entity->use_count == 0 && change > 0 && subdev) {
+		ret = v4l2_subdev_call(subdev, core, s_power, 1);
+		if (ret < 0 && ret != -ENOIOCTLCMD)
+			return ret;
+	}
+
+	entity->use_count += change;
+	WARN_ON(entity->use_count < 0);
+
+	if (entity->use_count == 0 && change < 0 && subdev)
+		v4l2_subdev_call(subdev, core, s_power, 0);
+
+	return 0;
+}
+
+/*
+ * ipu_pipeline_pm_power - Apply power change to all entities
+ * in a pipeline
+ * @entity: The entity
+ * @change: Use count change
+ * @from_pad: Starting pad
+ *
+ * Walk the pipeline to update the use count and the power state of
+ * all non-node
+ * entities.
+ *
+ * Return 0 on success or a negative error code on failure.
+ */
+static int ipu_pipeline_pm_power(struct media_entity *entity,
+				 int change, int from_pad)
+{
+	struct media_entity_graph graph;
+	struct media_entity *first = entity;
+	int ret = 0;
+
+	if (!change)
+		return 0;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
+	media_graph_walk_init(&graph, entity->graph_obj.mdev);
+#endif
+	media_graph_walk_start(&graph, &entity->pads[from_pad]);
+
+	while (!ret && (entity = media_graph_walk_next(&graph)))
+		if (!is_media_entity_v4l2_io(entity))
+			ret = ipu_pipeline_pm_power_one(entity, change);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
+	media_graph_walk_cleanup(&graph);
+#endif
+	if (!ret)
+		return 0;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
+	media_graph_walk_init(&graph, entity->graph_obj.mdev);
+#endif
+	media_graph_walk_start(&graph, &first->pads[from_pad]);
+
+	while ((first = media_graph_walk_next(&graph)) &&
+	       first != entity)
+		if (!is_media_entity_v4l2_io(first))
+			ipu_pipeline_pm_power_one(first, -change);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
+	media_graph_walk_cleanup(&graph);
+#endif
+	return ret;
+}
+
+/*
+ * ipu_pipeline_pm_use - Update the use count of an entity
+ * @entity: The entity
+ * @use: Use (1) or stop using (0) the entity
+ *
+ * Update the use count of all entities in the pipeline and power entities
+ * on or off accordingly.
+ *
+ * Return 0 on success or a negative error code on failure. Powering entities
+ * off is assumed to never fail. No failure can occur when the use parameter is
+ * set to 0.
+ */
+int ipu_pipeline_pm_use(struct media_entity *entity, int use)
+{
+	int change = use ? 1 : -1;
+	int ret;
+
+	mutex_lock(&entity->
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 5, 0)
+		   parent
+#else
+		   graph_obj.mdev
+#endif
+		   ->graph_mutex);
+
+	/* Apply use count to node. */
+	entity->use_count += change;
+	WARN_ON(entity->use_count < 0);
+
+	/* Apply power change to connected non-nodes. */
+	ret = ipu_pipeline_pm_power(entity, change, 0);
+	if (ret < 0)
+		entity->use_count -= change;
+
+	mutex_unlock(&entity->
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 5, 0)
+		     parent
+#else
+		     graph_obj.mdev
+#endif
+		     ->graph_mutex);
+
+	return ret;
+}
+
+/*
+ * ipu_pipeline_link_notify - Link management notification callback
+ * @link: The link
+ * @flags: New link flags that will be applied
+ * @notification: The link's state change notification type
+ * (MEDIA_DEV_NOTIFY_*)
+ *
+ * React to link management on powered pipelines by updating the use count of
+ * all entities in the source and sink sides of the link. Entities are powered
+ * on or off accordingly.
+ *
+ * Return 0 on success or a negative error code on failure. Powering entities
+ * off is assumed to never fail. This function will not fail for disconnection
+ * events.
+ */
+static int ipu_pipeline_link_notify(struct media_link *link, u32 flags,
+				    unsigned int notification)
+{
+	struct media_entity *source = link->source->entity;
+	struct media_entity *sink = link->sink->entity;
+	int source_use = ipu_pipeline_pm_use_count(link->source);
+	int sink_use = ipu_pipeline_pm_use_count(link->sink);
+	int ret;
+
+	if (notification == MEDIA_DEV_NOTIFY_POST_LINK_CH &&
+	    !(flags & MEDIA_LNK_FL_ENABLED)) {
+		/* Powering off entities is assumed to never fail. */
+		ipu_pipeline_pm_power(source, -sink_use, 0);
+		ipu_pipeline_pm_power(sink, -source_use, 0);
+		return 0;
+	}
+
+	if (notification == MEDIA_DEV_NOTIFY_PRE_LINK_CH &&
+	    (flags & MEDIA_LNK_FL_ENABLED)) {
+		ret = ipu_pipeline_pm_power(source, sink_use, 0);
+		if (ret < 0)
+			return ret;
+
+		ret = ipu_pipeline_pm_power(sink, source_use, 0);
+		if (ret < 0)
+			ipu_pipeline_pm_power(source, -sink_use, 0);
+
+		return ret;
+	}
+
+	return 0;
+}
+
+/* END adapted code from drivers/media/platform/omap3isp/isp.c */
+#endif /* < v4.6 */
+
+#if IS_ENABLED(CONFIG_VIDEO_INTEL_IPU_USE_PLATFORMDATA)
 struct isys_i2c_test {
 	u8 bus_nr;
 	u16 addr;
@@ -132,6 +309,7 @@ i2c_client *isys_find_i2c_subdev(struct i2c_adapter *adapter,
 		return NULL;
 	return test.client;
 }
+#endif
 static int
 isys_complete_ext_device_registration(struct ipu_isys *isys,
 				      struct v4l2_subdev *sd,
@@ -169,7 +347,7 @@ skip_unregister_subdev:
 	v4l2_device_unregister_subdev(sd);
 	return rval;
 }
-
+#if IS_ENABLED(CONFIG_VIDEO_INTEL_IPU_USE_PLATFORMDATA)
 static int isys_register_ext_subdev(struct ipu_isys *isys,
 				    struct ipu_isys_subdev_info *sd_info)
 {
@@ -183,9 +361,16 @@ static int isys_register_ext_subdev(struct ipu_isys *isys,
 			sd_info->i2c.i2c_adapter_bdf,
 			sizeof(sd_info->i2c.i2c_adapter_bdf));
 	if (bus < 0) {
-		dev_err(&isys->adev->dev, "Failed to find adapter!");
+		dev_err(&isys->adev->dev,
+			"getting i2c bus id for adapter %d (bdf %s) failed",
+			sd_info->i2c.i2c_adapter_id,
+			sd_info->i2c.i2c_adapter_bdf);
 		return -ENOENT;
 	}
+	dev_info(&isys->adev->dev,
+		 "got i2c bus id %d for adapter %d (bdf %s)", bus,
+		 sd_info->i2c.i2c_adapter_id,
+		 sd_info->i2c.i2c_adapter_bdf);
 	adapter = i2c_get_adapter(bus);
 	if (!adapter) {
 		dev_warn(&isys->adev->dev, "can't find adapter\n");
@@ -249,6 +434,7 @@ static void isys_register_ext_subdevs(struct ipu_isys *isys)
 	for (sd_info = spdata->subdevs; *sd_info; sd_info++)
 		isys_register_ext_subdev(isys, *sd_info);
 }
+#endif
 
 static void isys_unregister_subdevices(struct ipu_isys *isys)
 {
@@ -269,12 +455,15 @@ static int isys_register_subdevices(struct ipu_isys *isys)
 	const struct ipu_isys_internal_csi2_pdata *csi2 =
 	    &isys->pdata->ipdata->csi2;
 	struct ipu_isys_csi2_be_soc *csi2_be_soc;
+#if IS_ENABLED(CONFIG_VIDEO_INTEL_IPU_USE_PLATFORMDATA)
 	struct ipu_isys_subdev_pdata *spdata = isys->pdata->spdata;
 	struct ipu_isys_subdev_info **sd_info;
 	DECLARE_BITMAP(csi2_enable, 32);
+#endif
 	unsigned int i, k;
 	int rval;
 
+#if IS_ENABLED(CONFIG_VIDEO_INTEL_IPU_USE_PLATFORMDATA)
 	/*
 	 * Here is somewhat a workaround, let each platform decide
 	 * if csi2 port can be optimized, which means only registered
@@ -296,6 +485,7 @@ static int isys_register_subdevices(struct ipu_isys *isys)
 	} else {
 		bitmap_fill(csi2_enable, 32);
 	}
+#endif
 	isys->csi2 = devm_kcalloc(&isys->adev->dev, csi2->nports,
 				  sizeof(*isys->csi2), GFP_KERNEL);
 	if (!isys->csi2) {
@@ -304,8 +494,10 @@ static int isys_register_subdevices(struct ipu_isys *isys)
 	}
 
 	for (i = 0; i < csi2->nports; i++) {
+#if IS_ENABLED(CONFIG_VIDEO_INTEL_IPU_USE_PLATFORMDATA)
 		if (!test_bit(i, csi2_enable))
 			continue;
+#endif
 		rval = ipu_isys_csi2_init(&isys->csi2[i], isys,
 					  isys->pdata->base +
 					  csi2->offsets[i], i);
@@ -333,8 +525,10 @@ static int isys_register_subdevices(struct ipu_isys *isys)
 	}
 
 	for (i = 0; i < csi2->nports; i++) {
+#if IS_ENABLED(CONFIG_VIDEO_INTEL_IPU_USE_PLATFORMDATA)
 		if (!test_bit(i, csi2_enable))
 			continue;
+#endif
 		rval = media_create_pad_link(&isys->csi2[i].asd.sd.entity,
 					     CSI2_PAD_SOURCE,
 					     &isys->csi2_be.asd.sd.entity,
@@ -366,254 +560,152 @@ fail:
 	return rval;
 }
 
-#if defined(IPU_IWAKE_ENABLE)
-/* read ltrdid threshold values from BIOS or system configuration */
-static void get_lut_ltrdid(struct ipu_isys *isys, struct ltr_did *pltr_did)
+#if !IS_ENABLED(CONFIG_VIDEO_INTEL_IPU_USE_PLATFORMDATA)
+/* The .bound() notifier callback when a match is found */
+static int isys_notifier_bound(struct v4l2_async_notifier *notifier,
+			       struct v4l2_subdev *sd,
+			       struct v4l2_async_subdev *asd)
 {
-	struct isys_iwake_watermark *iwake_watermark = isys->iwake_watermark;
-	/* default values*/
-	struct ltr_did ltrdid_default;
+	struct ipu_isys *isys = container_of(notifier,
+					struct ipu_isys, notifier);
+	struct sensor_async_subdev *s_asd = container_of(asd,
+					struct sensor_async_subdev, asd);
 
-	ltrdid_default.lut_ltr.value = LTR_DEFAULT_VALUE;
-	ltrdid_default.lut_fill_time.value = FILL_TIME_DEFAULT_VALUE;
+	dev_info(&isys->adev->dev, "bind %s nlanes is %d port is %d\n",
+		 sd->name, s_asd->csi2.nlanes, s_asd->csi2.port);
+	isys_complete_ext_device_registration(isys, sd, &s_asd->csi2);
 
-	if (iwake_watermark->ltrdid.lut_ltr.value)
-		*pltr_did = iwake_watermark->ltrdid;
-	else
-		*pltr_did = ltrdid_default;
+	return v4l2_device_register_subdev_nodes(&isys->v4l2_dev);
 }
 
-static int set_iwake_register(struct ipu_isys *isys, u32 index, u32 value)
+static void isys_notifier_unbind(struct v4l2_async_notifier *notifier,
+				 struct v4l2_subdev *sd,
+				 struct v4l2_async_subdev *asd)
 {
-	int ret = 0;
-	u32 req_id = index;
-	u32 offset = 0;
+	struct ipu_isys *isys = container_of(notifier,
+					struct ipu_isys, notifier);
 
-	ret = ipu_fw_isys_send_proxy_token(isys, req_id, index, offset, value);
-	if (ret)
-		dev_err(&isys->adev->dev, "write %d failed %d", index, ret);
-
-	return ret;
+	dev_info(&isys->adev->dev, "unbind %s\n", sd->name);
 }
 
-/*
- * When input system is powered up and before enabling any new sensor capture,
- * or after disabling any sensor capture the following values need to be set:
- * LTR_value = LTR(usec) from calculation;
- * LTR_scale = 2;
- * DID_value = DID(usec) from calculation;
- * DID_scale = 2;
- *
- * When input system is powered down, the LTR and DID values
- * must be returned to the default values:
- * LTR_value = 1023;
- * LTR_scale = 5;
- * DID_value = 1023;
- * DID_scale = 2;
- */
-static void set_iwake_ltrdid(struct ipu_isys *isys,
-			     u16 ltr,
-			     u16 did,
-			     enum ltr_did_type use)
+static int isys_notifier_complete(struct v4l2_async_notifier *notifier)
 {
-	/* did_scale will set to 2= 1us */
-	u16 ltr_val, ltr_scale, did_val;
-	union fabric_ctrl fc;
+	struct ipu_isys *isys = container_of(notifier,
+					struct ipu_isys, notifier);
+
+	dev_info(&isys->adev->dev, "All sensor registration completed.\n");
+
+	return v4l2_device_register_subdev_nodes(&isys->v4l2_dev);
+}
+
+static const struct v4l2_async_notifier_operations isys_async_ops = {
+	.bound = isys_notifier_bound,
+	.unbind = isys_notifier_unbind,
+	.complete = isys_notifier_complete,
+};
+
+static int isys_fwnode_parse(struct device *dev,
+			     struct v4l2_fwnode_endpoint *vep,
+			     struct v4l2_async_subdev *asd)
+{
+	struct sensor_async_subdev *s_asd =
+			container_of(asd, struct sensor_async_subdev, asd);
+
+	s_asd->csi2.port = vep->base.port;
+	s_asd->csi2.nlanes = vep->bus.mipi_csi2.num_data_lanes;
+
+	return 0;
+}
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
+static int isys_notifier_init(struct ipu_isys *isys)
+{
 	struct ipu_device *isp = isys->adev->isp;
+	size_t asd_struct_size = sizeof(struct sensor_async_subdev);
+	int ret;
 
-	switch (use) {
-	case LTR_IWAKE_ON:
-		ltr_val = min_t(u16, ltr, (u16)LTR_DID_VAL_MAX);
-		did_val = min_t(u16, did, (u16)LTR_DID_VAL_MAX);
-		ltr_scale = (ltr == LTR_DID_VAL_MAX &&
-				did == LTR_DID_VAL_MAX) ?
-				LTR_SCALE_DEFAULT : LTR_SCALE_1024NS;
-		break;
-	case LTR_ISYS_ON:
-	case LTR_IWAKE_OFF:
-		ltr_val = LTR_DID_PKGC_2R;
-		did_val = LTR_DID_PKGC_2R;
-		ltr_scale = LTR_SCALE_1024NS;
-		break;
-	case LTR_ISYS_OFF:
-		ltr_val   = LTR_DID_VAL_MAX;
-		did_val   = LTR_DID_VAL_MAX;
-		ltr_scale = LTR_SCALE_DEFAULT;
-		break;
-	default:
-		return;
-	}
+	v4l2_async_notifier_init(&isys->notifier);
+	ret = v4l2_async_notifier_parse_fwnode_endpoints(&isp->pdev->dev,
+							 &isys->notifier,
+							 asd_struct_size,
+							 isys_fwnode_parse);
 
-	fc.value = readl(isp->base + IPU_BUTTRESS_FABIC_CONTROL);
-	fc.bits.ltr_val = ltr_val;
-	fc.bits.ltr_scale = ltr_scale;
-	fc.bits.did_val = did_val;
-	fc.bits.did_scale = 2;
-	dev_dbg(&isys->adev->dev,
-		"%s ltr: %d  did: %d", __func__, ltr_val, did_val);
-	writel(fc.value, isp->base + IPU_BUTTRESS_FABIC_CONTROL);
-}
-
-/* SW driver may clear register GDA_ENABLE_IWAKE before the FW configures the
- * stream for debug purposes. Otherwise SW should not access this register.
- */
-static int enable_iwake(struct ipu_isys *isys, bool enable)
-{
-	int ret = 0;
-	struct isys_iwake_watermark *iwake_watermark = isys->iwake_watermark;
-
-	mutex_lock(&iwake_watermark->mutex);
-	if (iwake_watermark->iwake_enabled == enable) {
-		mutex_unlock(&iwake_watermark->mutex);
+	if (ret < 0) {
+		dev_err(&isys->adev->dev,
+			"v4l2 parse_fwnode_endpoints() failed: %d\n", ret);
 		return ret;
 	}
-	ret = set_iwake_register(isys, GDA_ENABLE_IWAKE_INDEX, enable);
-	if (!ret)
-		iwake_watermark->iwake_enabled = enable;
-	mutex_unlock(&iwake_watermark->mutex);
+
+	if (list_empty(&isys->notifier.asd_list)) {
+		/* isys probe could continue with async subdevs missing */
+		dev_warn(&isys->adev->dev, "no subdev found in graph\n");
+		return 0;
+	}
+
+	isys->notifier.ops = &isys_async_ops;
+	ret = v4l2_async_notifier_register(&isys->v4l2_dev, &isys->notifier);
+	if (ret) {
+		dev_err(&isys->adev->dev,
+			"failed to register async notifier : %d\n", ret);
+		v4l2_async_notifier_cleanup(&isys->notifier);
+	}
+
 	return ret;
 }
 
-void update_watermark_setting(struct ipu_isys *isys)
+static void isys_notifier_cleanup(struct ipu_isys *isys)
 {
-	struct isys_iwake_watermark *iwake_watermark = isys->iwake_watermark;
-	struct list_head *stream_node;
-	struct video_stream_watermark *p_watermark;
-	struct ltr_did ltrdid;
-	u16 calc_fill_time_us = 0;
-	u16 ltr = 0;
-	u16 did = 0;
-	u32 iwake_threshold, iwake_critical_threshold;
-	u64 threshold_bytes;
-	u64 isys_pb_datarate_mbs = 0;
-	u16 sram_granulrity_shift =
-		(ipu_ver == IPU_VER_6 || ipu_ver == IPU_VER_6EP ||
-		 ipu_ver == IPU_VER_6EP_MTL) ?
-		IPU6_SRAM_GRANULRITY_SHIFT : IPU6SE_SRAM_GRANULRITY_SHIFT;
-	int max_sram_size =
-		(ipu_ver == IPU_VER_6 || ipu_ver == IPU_VER_6EP ||
-		 ipu_ver == IPU_VER_6EP_MTL) ?
-		IPU6_MAX_SRAM_SIZE : IPU6SE_MAX_SRAM_SIZE;
-
-	mutex_lock(&iwake_watermark->mutex);
-	if (iwake_watermark->force_iwake_disable) {
-		set_iwake_ltrdid(isys, 0, 0, LTR_IWAKE_OFF);
-		set_iwake_register(isys, GDA_IRQ_CRITICAL_THRESHOLD_INDEX,
-				   CRITICAL_THRESHOLD_IWAKE_DISABLE);
-		mutex_unlock(&iwake_watermark->mutex);
-		return;
-	}
-
-	if (list_empty(&iwake_watermark->video_list)) {
-		isys_pb_datarate_mbs = 0;
-	} else {
-		list_for_each(stream_node, &iwake_watermark->video_list)
-		{
-			p_watermark = list_entry(stream_node,
-						 struct video_stream_watermark,
-						 stream_node);
-			isys_pb_datarate_mbs += p_watermark->stream_data_rate;
-		}
-	}
-	mutex_unlock(&iwake_watermark->mutex);
-
-	if (!isys_pb_datarate_mbs) {
-		enable_iwake(isys, false);
-		set_iwake_ltrdid(isys, 0, 0, LTR_IWAKE_OFF);
-		mutex_lock(&iwake_watermark->mutex);
-		set_iwake_register(isys, GDA_IRQ_CRITICAL_THRESHOLD_INDEX,
-				   CRITICAL_THRESHOLD_IWAKE_DISABLE);
-		mutex_unlock(&iwake_watermark->mutex);
-	} else {
-		/* should enable iwake by default according to FW */
-		enable_iwake(isys, true);
-		calc_fill_time_us = (u16)(max_sram_size / isys_pb_datarate_mbs);
-		get_lut_ltrdid(isys, &ltrdid);
-
-		if (calc_fill_time_us <= ltrdid.lut_fill_time.bits.th0)
-			ltr = 0;
-		else if (calc_fill_time_us <= ltrdid.lut_fill_time.bits.th1)
-			ltr = ltrdid.lut_ltr.bits.val0;
-		else if (calc_fill_time_us <= ltrdid.lut_fill_time.bits.th2)
-			ltr = ltrdid.lut_ltr.bits.val1;
-		else if (calc_fill_time_us <= ltrdid.lut_fill_time.bits.th3)
-			ltr = ltrdid.lut_ltr.bits.val2;
-		else
-			ltr = ltrdid.lut_ltr.bits.val3;
-
-		did = calc_fill_time_us - ltr;
-
-		threshold_bytes = did * isys_pb_datarate_mbs;
-		/* calculate iwake threshold with 2KB granularity pages */
-		iwake_threshold =
-			max_t(u32, 1, threshold_bytes >> sram_granulrity_shift);
-
-		iwake_threshold = min_t(u32, iwake_threshold, max_sram_size);
-
-		/* set the critical threshold to halfway between
-		 * iwake threshold and the full buffer.
-		 */
-		iwake_critical_threshold = iwake_threshold +
-			(IS_PIXEL_BUFFER_PAGES - iwake_threshold) / 2;
-
-		dev_dbg(&isys->adev->dev, "%s threshold: %u  critical: %u",
-			__func__, iwake_threshold, iwake_critical_threshold);
-		set_iwake_ltrdid(isys, ltr, did, LTR_IWAKE_ON);
-		mutex_lock(&iwake_watermark->mutex);
-		set_iwake_register(isys,
-				   GDA_IWAKE_THRESHOLD_INDEX, iwake_threshold);
-
-		set_iwake_register(isys,
-				   GDA_IRQ_CRITICAL_THRESHOLD_INDEX,
-				   iwake_critical_threshold);
-		mutex_unlock(&iwake_watermark->mutex);
-
-		writel(VAL_PKGC_PMON_CFG_RESET,
-		       isys->adev->isp->base + REG_PKGC_PMON_CFG);
-		writel(VAL_PKGC_PMON_CFG_START,
-		       isys->adev->isp->base + REG_PKGC_PMON_CFG);
-	}
+	v4l2_async_notifier_unregister(&isys->notifier);
+	v4l2_async_notifier_cleanup(&isys->notifier);
 }
-
-static int isys_iwake_watermark_init(struct ipu_isys *isys)
+#else
+static int isys_notifier_init(struct ipu_isys *isys)
 {
-	struct isys_iwake_watermark *iwake_watermark;
+	struct ipu_device *isp = isys->adev->isp;
+	size_t asd_struct_size = sizeof(struct sensor_async_subdev);
+	int ret;
 
-	if (isys->iwake_watermark)
+	v4l2_async_nf_init(&isys->notifier);
+	ret = v4l2_async_nf_parse_fwnode_endpoints(&isp->pdev->dev,
+						   &isys->notifier,
+						   asd_struct_size,
+						   isys_fwnode_parse);
+	if (ret < 0) {
+		dev_err(&isys->adev->dev,
+			"v4l2 parse_fwnode_endpoints() failed: %d\n", ret);
+		return ret;
+	}
+	if (list_empty(&isys->notifier.asd_list)) {
+		/* isys probe could continue with async subdevs missing */
+		dev_warn(&isys->adev->dev, "no subdev found in graph\n");
 		return 0;
+	}
 
-	iwake_watermark = devm_kzalloc(&isys->adev->dev,
-				       sizeof(*iwake_watermark), GFP_KERNEL);
-	if (!iwake_watermark)
-		return -ENOMEM;
-	INIT_LIST_HEAD(&iwake_watermark->video_list);
-	mutex_init(&iwake_watermark->mutex);
+	isys->notifier.ops = &isys_async_ops;
+	ret = v4l2_async_nf_register(&isys->v4l2_dev, &isys->notifier);
+	if (ret) {
+		dev_err(&isys->adev->dev,
+			"failed to register async notifier : %d\n", ret);
+		v4l2_async_nf_cleanup(&isys->notifier);
+	}
 
-	iwake_watermark->ltrdid.lut_ltr.value = 0;
-	isys->iwake_watermark = iwake_watermark;
-	iwake_watermark->isys = isys;
-	iwake_watermark->iwake_enabled = false;
-	iwake_watermark->force_iwake_disable = false;
-	return 0;
+	return ret;
 }
 
-static int isys_iwake_watermark_cleanup(struct ipu_isys *isys)
+static void isys_notifier_cleanup(struct ipu_isys *isys)
 {
-	struct isys_iwake_watermark *iwake_watermark = isys->iwake_watermark;
-
-	if (!iwake_watermark)
-		return -EINVAL;
-	mutex_lock(&iwake_watermark->mutex);
-	list_del(&iwake_watermark->video_list);
-	mutex_unlock(&iwake_watermark->mutex);
-	mutex_destroy(&iwake_watermark->mutex);
-	isys->iwake_watermark = NULL;
-	return 0;
+	v4l2_async_nf_unregister(&isys->notifier);
+	v4l2_async_nf_cleanup(&isys->notifier);
 }
+#endif
 #endif
 
 static struct media_device_ops isys_mdev_ops = {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 6, 0)
+	.link_notify = ipu_pipeline_link_notify,
+#else
 	.link_notify = v4l2_pipeline_link_notify,
+#endif
 };
 
 static int isys_register_devices(struct ipu_isys *isys)
@@ -621,15 +713,26 @@ static int isys_register_devices(struct ipu_isys *isys)
 	int rval;
 
 	isys->media_dev.dev = &isys->adev->dev;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 12)
 	isys->media_dev.ops = &isys_mdev_ops;
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(4, 6, 0)
+	isys->media_dev.link_notify = ipu_pipeline_link_notify;
+#else
+	isys->media_dev.link_notify = v4l2_pipeline_link_notify;
+#endif
 	strlcpy(isys->media_dev.model,
 		IPU_MEDIA_DEV_MODEL_NAME, sizeof(isys->media_dev.model));
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 14, 0)
+	isys->media_dev.driver_version = LINUX_VERSION_CODE;
+#endif
 	snprintf(isys->media_dev.bus_info, sizeof(isys->media_dev.bus_info),
 		 "pci:%s", dev_name(isys->adev->dev.parent->parent));
 	strlcpy(isys->v4l2_dev.name, isys->media_dev.model,
 		sizeof(isys->v4l2_dev.name));
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
 	media_device_init(&isys->media_dev);
+#endif
 
 	rval = media_device_register(&isys->media_dev);
 	if (rval < 0) {
@@ -649,7 +752,13 @@ static int isys_register_devices(struct ipu_isys *isys)
 	if (rval)
 		goto out_v4l2_device_unregister;
 
+#if !IS_ENABLED(CONFIG_VIDEO_INTEL_IPU_USE_PLATFORMDATA)
+	rval = isys_notifier_init(isys);
+	if (rval)
+		goto out_isys_unregister_subdevices;
+#else
 	isys_register_ext_subdevs(isys);
+#endif
 
 	rval = v4l2_device_register_subdev_nodes(&isys->v4l2_dev);
 	if (rval)
@@ -658,15 +767,25 @@ static int isys_register_devices(struct ipu_isys *isys)
 	return 0;
 
 out_isys_notifier_cleanup:
+#if !IS_ENABLED(CONFIG_VIDEO_INTEL_IPU_USE_PLATFORMDATA)
+	isys_notifier_cleanup(isys);
+#endif
 
+#if !IS_ENABLED(CONFIG_VIDEO_INTEL_IPU_USE_PLATFORMDATA)
+out_isys_unregister_subdevices:
 	isys_unregister_subdevices(isys);
+#else
+	isys_unregister_subdevices(isys);
+#endif
 
 out_v4l2_device_unregister:
 	v4l2_device_unregister(&isys->v4l2_dev);
 
 out_media_device_unregister:
 	media_device_unregister(&isys->media_dev);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
 	media_device_cleanup(&isys->media_dev);
+#endif
 
 	return rval;
 }
@@ -676,7 +795,9 @@ static void isys_unregister_devices(struct ipu_isys *isys)
 	isys_unregister_subdevices(isys);
 	v4l2_device_unregister(&isys->v4l2_dev);
 	media_device_unregister(&isys->media_dev);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
 	media_device_cleanup(&isys->media_dev);
+#endif
 }
 
 #ifdef CONFIG_PM
@@ -697,7 +818,11 @@ static int isys_runtime_pm_resume(struct device *dev)
 
 	ipu_trace_restore(dev);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 	cpu_latency_qos_update_request(&isys->pm_qos, ISYS_PM_QOS_VALUE);
+#else
+	pm_qos_update_request(&isys->pm_qos, ISYS_PM_QOS_VALUE);
+#endif
 
 	ret = ipu_buttress_start_tsc_sync(isp);
 	if (ret)
@@ -714,9 +839,6 @@ static int isys_runtime_pm_resume(struct device *dev)
 	}
 	isys_setup_hw(isys);
 
-#if defined(IPU_IWAKE_ENABLE)
-	set_iwake_ltrdid(isys, 0, 0, LTR_ISYS_ON);
-#endif
 	return 0;
 }
 
@@ -739,13 +861,14 @@ static int isys_runtime_pm_suspend(struct device *dev)
 	mutex_unlock(&isys->mutex);
 
 	isys->phy_termcal_val = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 	cpu_latency_qos_update_request(&isys->pm_qos, PM_QOS_DEFAULT_VALUE);
+#else
+	pm_qos_update_request(&isys->pm_qos, PM_QOS_DEFAULT_VALUE);
+#endif
 
 	ipu_mmu_hw_cleanup(adev->mmu);
 
-#if defined(IPU_IWAKE_ENABLE)
-	set_iwake_ltrdid(isys, 0, 0, LTR_ISYS_OFF);
-#endif
 	return 0;
 }
 
@@ -793,24 +916,35 @@ static void isys_remove(struct ipu_bus_device *adev)
 	list_for_each_entry_safe(fwmsg, safe, &isys->framebuflist, head) {
 		dma_free_attrs(&adev->dev, sizeof(struct isys_fw_msgs),
 			       fwmsg, fwmsg->dma_addr,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0)
+			       NULL);
+#else
 			       0);
+#endif
 	}
 
 	list_for_each_entry_safe(fwmsg, safe, &isys->framebuflist_fw, head) {
 		dma_free_attrs(&adev->dev, sizeof(struct isys_fw_msgs),
 			       fwmsg, fwmsg->dma_addr,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0)
+			       NULL
+#else
 			       0
+#endif
 		    );
 	}
 
-#if defined(IPU_IWAKE_ENABLE)
-	isys_iwake_watermark_cleanup(isys);
-#endif
-
 	ipu_trace_uninit(&adev->dev);
+#if !IS_ENABLED(CONFIG_VIDEO_INTEL_IPU_USE_PLATFORMDATA)
+	isys_notifier_cleanup(isys);
+#endif
 	isys_unregister_devices(isys);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 	cpu_latency_qos_remove_request(&isys->pm_qos);
+#else
+	pm_qos_remove_request(&isys->pm_qos);
+#endif
 
 	if (!isp->secure_mode) {
 		ipu_cpd_free_pkg_dir(adev, isys->pkg_dir,
@@ -826,10 +960,28 @@ static void isys_remove(struct ipu_bus_device *adev)
 	mutex_destroy(&isys->reset_mutex);
 	if (isys->short_packet_source == IPU_ISYS_SHORT_PACKET_FROM_TUNIT) {
 		u32 trace_size = IPU_ISYS_SHORT_PACKET_TRACE_BUFFER_SIZE;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
 
 		dma_free_coherent(&adev->dev, trace_size,
 				  isys->short_packet_trace_buffer,
 				  isys->short_packet_trace_buffer_dma_addr);
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0)
+		struct dma_attrs attrs;
+
+		init_dma_attrs(&attrs);
+		dma_set_attr(DMA_ATTR_NON_CONSISTENT, &attrs);
+		dma_free_attrs(&adev->dev, trace_size,
+			       isys->short_packet_trace_buffer,
+			       isys->short_packet_trace_buffer_dma_addr,
+			       &attrs);
+#else
+		unsigned long attrs;
+
+		attrs = DMA_ATTR_NON_CONSISTENT;
+		dma_free_attrs(&adev->dev, trace_size,
+			       isys->short_packet_trace_buffer,
+			       isys->short_packet_trace_buffer_dma_addr, attrs);
+#endif
 	}
 }
 
@@ -854,48 +1006,9 @@ static int ipu_isys_icache_prefetch_set(void *data, u64 val)
 	return 0;
 }
 
-#if defined(IPU_IWAKE_ENABLE)
-static int isys_iwake_control_get(void *data, u64 *val)
-{
-	struct ipu_isys *isys = data;
-	struct isys_iwake_watermark *iwake_watermark = isys->iwake_watermark;
-
-	mutex_lock(&iwake_watermark->mutex);
-	*val = isys->iwake_watermark->force_iwake_disable;
-	mutex_unlock(&iwake_watermark->mutex);
-	return 0;
-}
-
-static int isys_iwake_control_set(void *data, u64 val)
-{
-	struct ipu_isys *isys = data;
-	struct isys_iwake_watermark *iwake_watermark;
-
-	if (val != !!val)
-		return -EINVAL;
-	/* If stream is open, refuse to set iwake */
-	if (isys->stream_opened)
-		return -EBUSY;
-
-	iwake_watermark = isys->iwake_watermark;
-	mutex_lock(&iwake_watermark->mutex);
-	isys->iwake_watermark->force_iwake_disable = !!val;
-	mutex_unlock(&iwake_watermark->mutex);
-	return 0;
-}
-
-#endif
-
 DEFINE_SIMPLE_ATTRIBUTE(isys_icache_prefetch_fops,
 			ipu_isys_icache_prefetch_get,
 			ipu_isys_icache_prefetch_set, "%llu\n");
-
-#if defined(IPU_IWAKE_ENABLE)
-DEFINE_SIMPLE_ATTRIBUTE(isys_iwake_control_fops,
-			isys_iwake_control_get,
-			isys_iwake_control_set, "%llu\n");
-
-#endif
 
 static int ipu_isys_init_debugfs(struct ipu_isys *isys)
 {
@@ -913,13 +1026,6 @@ static int ipu_isys_init_debugfs(struct ipu_isys *isys)
 				   dir, isys, &isys_icache_prefetch_fops);
 	if (IS_ERR(file))
 		goto err;
-
-#if defined(IPU_IWAKE_ENABLE)
-	file = debugfs_create_file("iwake_disable", 0600,
-				   dir, isys, &isys_iwake_control_fops);
-	if (IS_ERR(file))
-		goto err;
-#endif
 
 	isys->debugfsdir = dir;
 
@@ -947,7 +1053,11 @@ static int alloc_fw_msg_bufs(struct ipu_isys *isys, int amount)
 		addr = dma_alloc_attrs(&isys->adev->dev,
 				       sizeof(struct isys_fw_msgs),
 				       &dma_addr, GFP_KERNEL,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0)
+				       NULL);
+#else
 				       0);
+#endif
 		if (!addr)
 			break;
 		addr->dma_addr = dma_addr;
@@ -967,7 +1077,11 @@ static int alloc_fw_msg_bufs(struct ipu_isys *isys, int amount)
 		dma_free_attrs(&isys->adev->dev,
 			       sizeof(struct isys_fw_msgs),
 			       addr, addr->dma_addr,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0)
+			       NULL);
+#else
 			       0);
+#endif
 		spin_lock_irqsave(&isys->listlock, flags);
 	}
 	spin_unlock_irqrestore(&isys->listlock, flags);
@@ -1153,27 +1267,22 @@ static int isys_probe(struct ipu_bus_device *adev)
 	ipu_trace_init(adev->isp, isys->pdata->base, &adev->dev,
 		       isys_trace_blocks);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 	cpu_latency_qos_add_request(&isys->pm_qos, PM_QOS_DEFAULT_VALUE);
+#else
+	pm_qos_add_request(&isys->pm_qos, PM_QOS_CPU_DMA_LATENCY,
+			   PM_QOS_DEFAULT_VALUE);
+#endif
 	alloc_fw_msg_bufs(isys, 20);
 
 	rval = isys_register_devices(isys);
 	if (rval)
 		goto out_remove_pkg_dir_shared_buffer;
-#if defined(IPU_IWAKE_ENABLE)
-	rval = isys_iwake_watermark_init(isys);
-	if (rval)
-		goto out_unregister_devices;
-#endif
 
 	ipu_mmu_hw_cleanup(adev->mmu);
 
 	return 0;
 
-#if defined(IPU_IWAKE_ENABLE)
-out_unregister_devices:
-	isys_iwake_watermark_cleanup(isys);
-	isys_unregister_devices(isys);
-#endif
 out_remove_pkg_dir_shared_buffer:
 	if (!isp->secure_mode)
 		ipu_cpd_free_pkg_dir(adev, isys->pkg_dir,
@@ -1365,7 +1474,11 @@ int isys_isr_one(struct ipu_bus_device *adev)
 				struct vb2_buffer *vb;
 
 				vb = ipu_isys_buffer_to_vb2_buffer(ib);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 4, 0)
+				vb->v4l2_buf.field = pipe->cur_field;
+#else
 				to_vb2_v4l2_buffer(vb)->field = pipe->cur_field;
+#endif
 				list_del(&ib->head);
 
 				ipu_isys_queue_buf_done(ib);

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-// Copyright (C) 2013 - 2020 Intel Corporation
+// Copyright (C) 2013 - 2022 Intel Corporation
 
 #include <linux/clk.h>
 #include <linux/clkdev.h>
@@ -736,6 +736,9 @@ int ipu_buttress_map_fw_image(struct ipu_bus_device *sys,
 	const void *addr;
 	unsigned long n_pages;
 	int rval, i;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+	int nents;
+#endif
 
 	n_pages = PAGE_ALIGN(fw->size) >> PAGE_SHIFT;
 
@@ -762,6 +765,17 @@ int ipu_buttress_map_fw_image(struct ipu_bus_device *sys,
 		goto out;
 	}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+	nents = dma_map_sg(&sys->dev, sgt->sgl, sgt->orig_nents, DMA_TO_DEVICE);
+	if (!nents) {
+		rval = -ENOMEM;
+		sg_free_table(sgt);
+		goto out;
+	}
+	sgt->nents = nents;
+	dma_sync_sg_for_device(&sys->dev, sgt->sgl, sgt->orig_nents,
+			       DMA_TO_DEVICE);
+#else
 	rval = dma_map_sgtable(&sys->dev, sgt, DMA_TO_DEVICE, 0);
 	if (rval < 0) {
 		rval = -ENOMEM;
@@ -770,6 +784,7 @@ int ipu_buttress_map_fw_image(struct ipu_bus_device *sys,
 	}
 
 	dma_sync_sgtable_for_device(&sys->dev, sgt, DMA_TO_DEVICE);
+#endif
 
 out:
 	kfree(pages);
@@ -1033,6 +1048,32 @@ int ipu_buttress_tsc_read(struct ipu_device *isp, u64 *val)
 }
 EXPORT_SYMBOL_GPL(ipu_buttress_tsc_read);
 
+int ipu_buttress_isys_freq_set(void *data, u64 val)
+{
+	struct ipu_device *isp = data;
+	int rval;
+
+	if (val < BUTTRESS_MIN_FORCE_IS_FREQ ||
+	    val > BUTTRESS_MAX_FORCE_IS_FREQ)
+		return -EINVAL;
+
+	rval = pm_runtime_get_sync(&isp->isys->dev);
+	if (rval < 0) {
+		pm_runtime_put(&isp->isys->dev);
+		dev_err(&isp->pdev->dev, "Runtime PM failed (%d)\n", rval);
+		return rval;
+	}
+
+	do_div(val, BUTTRESS_IS_FREQ_STEP);
+	if (val)
+		ipu_buttress_set_isys_ratio(isp, val);
+
+	pm_runtime_put(&isp->isys->dev);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(ipu_buttress_isys_freq_set);
+
 #ifdef CONFIG_DEBUG_FS
 
 static int ipu_buttress_reg_open(struct inode *inode, struct file *file)
@@ -1154,31 +1195,6 @@ static int ipu_buttress_isys_freq_get(void *data, u64 *val)
 
 	*val = IPU_IS_FREQ_RATIO_BASE *
 	    (reg_val & IPU_BUTTRESS_IS_FREQ_CTL_DIVISOR_MASK);
-
-	return 0;
-}
-
-static int ipu_buttress_isys_freq_set(void *data, u64 val)
-{
-	struct ipu_device *isp = data;
-	int rval;
-
-	if (val < BUTTRESS_MIN_FORCE_IS_FREQ ||
-	    val > BUTTRESS_MAX_FORCE_IS_FREQ)
-		return -EINVAL;
-
-	rval = pm_runtime_get_sync(&isp->isys->dev);
-	if (rval < 0) {
-		pm_runtime_put(&isp->isys->dev);
-		dev_err(&isp->pdev->dev, "Runtime PM failed (%d)\n", rval);
-		return rval;
-	}
-
-	do_div(val, BUTTRESS_IS_FREQ_STEP);
-	if (val)
-		ipu_buttress_set_isys_ratio(isp, val);
-
-	pm_runtime_put(&isp->isys->dev);
 
 	return 0;
 }

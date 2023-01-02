@@ -69,7 +69,7 @@ struct ipu_isys_pipeline {
 	atomic_t sequence;
 	unsigned int seq_index;
 	struct sequence_info seq[IPU_ISYS_MAX_PARALLEL_SOF];
-	int source;	/* SSI stream source, sensor's source pad */
+	int source;	/* SSI stream source */
 	int stream_handle;	/* stream handle for CSS API */
 	unsigned int nr_output_pins;	/* How many firmware pins? */
 	enum ipu_isl_mode isl_mode;
@@ -110,7 +110,13 @@ struct ipu_isys_pipeline {
 	spinlock_t short_packet_queue_lock;
 	struct list_head pending_interlaced_bufs;
 	unsigned int short_packet_trace_index;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
 	struct media_graph graph;
+#else
+	struct media_entity_graph graph;
+#endif
+#endif
 	struct media_entity_enum entity_enum;
 	unsigned int vc;
 	struct ipu_isys_sub_stream_vc asv[CSI2_BE_SOC_SOURCE_PADS_NUM];
@@ -118,19 +124,6 @@ struct ipu_isys_pipeline {
 
 #define to_ipu_isys_pipeline(__pipe)				\
 	container_of((__pipe), struct ipu_isys_pipeline, pipe)
-
-#if defined(IPU_IWAKE_ENABLE)
-struct video_stream_watermark {
-	u32 width;
-	u32 height;
-	u32 vblank;
-	u32 hblank;
-	u32 frame_rate;
-	u64 pixel_rate;
-	u64 stream_data_rate;
-	struct list_head stream_node;
-};
-#endif
 
 struct ipu_isys_video {
 	/* Serialise access to other fields in the struct. */
@@ -154,9 +147,6 @@ struct ipu_isys_video {
 	unsigned int line_header_length;	/* bits */
 	unsigned int line_footer_length;	/* bits */
 	unsigned int enum_link_state; /* state for link enumeration by vc */
-#if defined(IPU_IWAKE_ENABLE)
-	struct video_stream_watermark *watermark;
-#endif
 
 	const struct ipu_isys_pixelformat *
 		(*try_fmt_vid_mplane)(struct ipu_isys_video *av,
