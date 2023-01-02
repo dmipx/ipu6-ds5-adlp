@@ -421,6 +421,11 @@ ipu_isys_get_pixelformat(struct ipu_isys_video *av, u32 pixelformat)
 		}
 	}
 
+	if (av->enum_link_state == IPU_ISYS_LINK_STATE_DONE)
+		for (pfmt = av->pfmts; pfmt->bpp; pfmt++)
+			if (pfmt->pixelformat == pixelformat)
+				return pfmt;
+
 	/* Not found. Get the default, i.e. the first defined one. */
 	for (pfmt = av->pfmts; pfmt->bpp; pfmt++)
 	{
@@ -438,10 +443,7 @@ static int ipu_isys_get_parm_subdev(struct ipu_isys_video *av,
 	int ret = 0;
 	struct v4l2_subdev_frame_interval *fi =
 		(struct v4l2_subdev_frame_interval *)data;
-	// ret = v4l2_subdev_call(sd, video, g_frame_interval, fi);
-	if (sd && sd->ops && sd->ops->video && sd->ops->video->g_frame_interval)
-		ret = sd->ops->video->g_frame_interval(sd, fi);
-	printk("DIMA %s:%d ret=%d\n", __func__, __LINE__, ret);
+	ret = v4l2_subdev_call(sd, video, g_frame_interval, fi);
 
 	return ret;
 }
@@ -454,8 +456,10 @@ static int ipu_isys_set_parm_subdev(struct ipu_isys_video *av,
 		(struct v4l2_subdev_frame_interval *)data;
 	/* v4l2_subdev_call doesn't call, access directly */
 	// ret = v4l2_subdev_call(sd, video, s_frame_interval, fi);
+
 	if (sd && sd->ops && sd->ops->video && sd->ops->video->s_frame_interval)
 		ret = sd->ops->video->s_frame_interval(sd, fi);
+
 	return ret;
 }
 
@@ -508,6 +512,7 @@ static int ipu_isys_enum_framesizes_subdev(struct ipu_isys_video *av,
 	int ret = 0;
 	struct v4l2_subdev_frame_size_enum *fse =
 		(struct v4l2_subdev_frame_size_enum *)data;
+	/* v4l2_subdev_call doesn't call, access directly */
 	// ret = v4l2_subdev_call(sd, pad, enum_frame_size, NULL, fse);
 	if (sd && sd->ops && sd->ops->pad && sd->ops->pad->enum_frame_size)
 		ret = sd->ops->pad->enum_frame_size(sd, NULL, fse);
@@ -580,6 +585,7 @@ static int ipu_isys_enum_frameintervals_subdev(struct ipu_isys_video *av,
 	int ret = 0;
 	struct v4l2_subdev_frame_interval_enum *fie =
 		(struct v4l2_subdev_frame_interval_enum *)data;
+	/* v4l2_subdev_call doesn't call, access directly */
 	// ret = v4l2_subdev_call(sd, pad, enum_frame_interval, NULL, fie);
 	if (sd && sd->ops && sd->ops->pad && sd->ops->pad->enum_frame_interval)
 		ret = sd->ops->pad->enum_frame_interval(sd, NULL, fie);
@@ -663,7 +669,8 @@ static int ipu_isys_enum_fmt_subdev(struct ipu_isys_video *av,
 	int ret = 0;
 	struct v4l2_subdev_mbus_code_enum *mce =
 		(struct v4l2_subdev_mbus_code_enum *)data;
-	// ret = v4l2_subdev_call(sd, pad, enum_frame_interval, NULL, fie);
+	/* v4l2_subdev_call doesn't call, access directly */
+	// ret = v4l2_subdev_call(sd, pad, enum_mbus_code, NULL, mce);
 	if (sd && sd->ops && sd->ops->pad && sd->ops->pad->enum_mbus_code)
 		ret = sd->ops->pad->enum_mbus_code(sd, NULL, mce);
 
@@ -726,9 +733,9 @@ int ipu_isys_vidioc_enum_fmt(struct file *file, void *fh,
 			if (pfmt->code == mce.code)
 				break;
 		}
+	        f->mbus_code = pfmt->code;
 	}
 	f->pixelformat = pfmt->pixelformat;
-	f->mbus_code = pfmt->code;
 
 	return 0;
 }
@@ -858,10 +865,26 @@ ipu_isys_video_try_fmt_vid_mplane(struct ipu_isys_video *av,
 	return pfmt;
 }
 
+static int ipu_isys_set_fmt_subdev(struct ipu_isys_video *av,
+									struct v4l2_subdev *sd, void *data)
+{
+	int ret = 0;
+	struct v4l2_subdev_format *fmt =
+		(struct v4l2_subdev_format *)data;
+	ret = v4l2_subdev_call(sd, pad, set_fmt, NULL, fmt);
+	// if (sd && sd->ops && sd->ops->pad && sd->ops->pad->set_fmt)
+	// 	ret = sd->ops->pad->set_fmt(sd, NULL, fmt);
+
+	return ret;
+}
+
 static int vidioc_s_fmt_vid_cap_mplane(struct file *file, void *fh,
 									   struct v4l2_format *f)
 {
 	struct ipu_isys_video *av = video_drvdata(file);
+	struct media_pad *source_pad = media_entity_remote_pad(&av->pad);
+	struct media_pad *remote_pad = source_pad;
+	struct v4l2_subdev *sd = NULL;
 
 	if (av->aq.vbq.streaming)
 		return -EBUSY;
@@ -869,6 +892,48 @@ static int vidioc_s_fmt_vid_cap_mplane(struct file *file, void *fh,
 	av->pfmt = av->try_fmt_vid_mplane(av, &f->fmt.pix_mp);
 	av->mpix = f->fmt.pix_mp;
 
+	if (av->enum_link_state == IPU_ISYS_LINK_STATE_DONE)
+	{
+		int ret = 0;
+		struct v4l2_subdev_format fmt = {
+			.which = V4L2_SUBDEV_FORMAT_ACTIVE,
+			.pad = 0,
+		};
+		struct v4l2_mbus_framefmt format = {
+			.width = av->mpix.width,
+			.height = av->mpix.height,
+			.code = av->pfmt->code,
+			.field = av->mpix.field,
+			.colorspace = av->mpix.colorspace,
+			.ycbcr_enc = av->mpix.ycbcr_enc,
+			.quantization = av->mpix.quantization,
+			.xfer_func = av->mpix.xfer_func,
+		};
+		fmt.format = format;
+		ret = media_pipeline_enumerate_by_vc_cb(av, ipu_isys_set_fmt_subdev, &fmt);
+		if (ret)
+			return -EINVAL;
+		
+		/* set format for CSI-2 and CSI2 BE SOC  */
+	do {
+		/* Non-subdev nodes can be safely ignored here. */
+		if (!is_media_entity_v4l2_subdev(remote_pad->entity))
+			continue;
+		/* Set only for IPU6 CSI entities */
+		if ((strncmp(remote_pad->entity->name,
+					IPU_ISYS_ENTITY_PREFIX " CSI",
+					strlen(IPU_ISYS_ENTITY_PREFIX " CSI")) != 0))
+			break;
+		dev_dbg(remote_pad->entity->graph_obj.mdev->dev,
+				"It finds: %s\n", remote_pad->entity->name);
+		sd = media_entity_to_v4l2_subdev(remote_pad->entity);
+		ret = ipu_isys_set_fmt_subdev(av, sd, &fmt);
+
+		if (ret)
+			return -EINVAL;
+	} while ((remote_pad =
+			media_entity_remote_pad(&remote_pad->entity->pads[0])));
+	}
 	return 0;
 }
 
@@ -876,9 +941,31 @@ static int vidioc_try_fmt_vid_cap_mplane(struct file *file, void *fh,
 										 struct v4l2_format *f)
 {
 	struct ipu_isys_video *av = video_drvdata(file);
+	const struct ipu_isys_pixelformat *pfmt = 
+		av->try_fmt_vid_mplane(av, &f->fmt.pix_mp);
 
-	av->try_fmt_vid_mplane(av, &f->fmt.pix_mp);
-
+	if (av->enum_link_state == IPU_ISYS_LINK_STATE_DONE)
+	{
+		int ret = 0;
+		struct v4l2_subdev_format fmt = {
+			.which = V4L2_SUBDEV_FORMAT_TRY,
+			.pad = 0,
+		};
+		struct v4l2_mbus_framefmt format = {
+			.width = f->fmt.pix_mp.width,
+			.height = f->fmt.pix_mp.height,
+			.code = pfmt->code,
+			.field = f->fmt.pix_mp.field,
+			.colorspace = f->fmt.pix_mp.colorspace,
+			.ycbcr_enc = f->fmt.pix_mp.ycbcr_enc,
+			.quantization = f->fmt.pix_mp.quantization,
+			.xfer_func = f->fmt.pix_mp.xfer_func,
+		};
+		fmt.format = format;
+		ret = media_pipeline_enumerate_by_vc_cb(av, ipu_isys_set_fmt_subdev, &fmt);
+		if (ret)
+			return -EINVAL;
+	}
 	return 0;
 }
 
@@ -1782,7 +1869,7 @@ static int ipu_isys_query_sensor_info(struct media_pad *source_pad,
 		{
 			ip->vc = ip->asv[qm.index].vc;
 			flag = true;
-			pr_info("The current entityvc:id:%d for: %s\n", ip->vc, sd->name);
+			// pr_info("The current entityvc:id:%d for: %s\n", ip->vc, sd->name);
 		}
 	}
 

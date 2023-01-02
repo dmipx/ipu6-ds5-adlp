@@ -1658,11 +1658,10 @@ static int ds5_sensor_s_frame_interval(struct v4l2_subdev *sd,
 {
 	struct ds5_sensor *sensor = container_of(sd, struct ds5_sensor, sd);
 	u16 framerate = 1;
-	printk("%s(): 1\n", __func__);
+
 	if (NULL == sd || NULL == fi || fi->interval.numerator == 0)
 		return -EINVAL;
 
-	printk("%s(): 2\n", __func__);
 	framerate = fi->interval.denominator / fi->interval.numerator;
 	framerate = __ds5_probe_framerate(sensor->config.resolution, framerate);
 	sensor->config.framerate = framerate;
@@ -3395,17 +3394,22 @@ static int ds5_mux_set_fmt(struct v4l2_subdev *sd, struct v4l2_subdev_state *v4l
 {
 	struct ds5 *state = container_of(sd, struct ds5, mux.sd.subdev);
 	struct v4l2_mbus_framefmt *ffmt;
-	u32 pad = fmt->pad;
+	struct ds5_sensor *sensor = state->mux.last_set;
+
+
+	u32 pad = sensor->mux_pad;
+	// u32 pad = fmt->pad;
 	int ret = 0;
 	int substream;
-	dev_info(sd->dev, "%s(): pad: %d, %d: %ux%u\n", __func__, pad, fmt->format.code,
-		 fmt->format.width, fmt->format.height);
+	dev_info(sd->dev, "%s(): fmt->pad:%d, sensor->mux_pad: %d, %d: %ux%u for sensor: %s\n", __func__, 
+	fmt->pad, pad, fmt->format.code, fmt->format.width, fmt->format.height, sensor->sd.name);
 
 	switch (pad) {
 	case DS5_MUX_PAD_DEPTH_A:
 	case DS5_MUX_PAD_MOTION_T_A:
 	case DS5_MUX_PAD_RGB_A:
-		ffmt = &ds5_ffmts[pad];
+		//ffmt = &ds5_ffmts[pad];
+		ffmt = &sensor->format;//ds5_ffmts[pad];
 		break;
 	case DS5_MUX_PAD_EXTERNAL:
 		ffmt = &ds5_ffmts[pad];
@@ -3437,8 +3441,10 @@ static int ds5_mux_get_fmt(struct v4l2_subdev *sd, struct v4l2_subdev_state *v4l
 		struct v4l2_subdev_format *fmt)
 {
 	struct ds5 *state = container_of(sd, struct ds5, mux.sd.subdev);
-	u32 pad = fmt->pad;
+	// u32 pad = fmt->pad;
 	int ret = 0;
+	struct ds5_sensor *sensor = state->mux.last_set;
+	u32 pad = sensor->mux_pad;
 
 	dev_info(sd->dev, "%s(): %u %p\n", __func__, pad, state->mux.last_set);
 
@@ -3446,7 +3452,8 @@ static int ds5_mux_get_fmt(struct v4l2_subdev *sd, struct v4l2_subdev_state *v4l
 	case DS5_MUX_PAD_DEPTH_A:
 	case DS5_MUX_PAD_MOTION_T_A:
 	case DS5_MUX_PAD_RGB_A:
-		fmt->format = ds5_ffmts[pad];
+		//fmt->format = ds5_ffmts[pad];
+		fmt->format = sensor->format;//ds5_ffmts[pad];
 		break;
 	case DS5_MUX_PAD_EXTERNAL:
 	fmt->format = ds5_ffmts[pad];
@@ -3455,7 +3462,7 @@ static int ds5_mux_get_fmt(struct v4l2_subdev *sd, struct v4l2_subdev_state *v4l
 		return -EINVAL;
 	}
 
-	dev_info(sd->dev, "%s(): pad:%u size:%d-%d, code:%d field:%d, color:%d\n", __func__, fmt->pad,
+	dev_info(sd->dev, "%s(): fmt->pad:%d, sensor->mux_pad:%u size:%d-%d, code:0x%x field:%d, color:%d\n", __func__, fmt->pad, pad,
 		fmt->format.width, fmt->format.height, fmt->format.code, fmt->format.field, fmt->format.colorspace);
 	return ret;
 }
