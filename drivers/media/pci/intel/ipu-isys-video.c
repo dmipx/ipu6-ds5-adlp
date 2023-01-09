@@ -943,8 +943,13 @@ static int vidioc_s_fmt_vid_cap_mplane(struct file *file, void *fh,
 		/* Set only for IPU6 CSI entities */
 		if ((strncmp(remote_pad->entity->name,
 					IPU_ISYS_ENTITY_PREFIX " CSI",
-					strlen(IPU_ISYS_ENTITY_PREFIX " CSI")) != 0))
+					strlen(IPU_ISYS_ENTITY_PREFIX " CSI")) != 0)){
+		dev_dbg(remote_pad->entity->graph_obj.mdev->dev,
+				"It finds: %s will set and break\n", remote_pad->entity->name);
+		sd = media_entity_to_v4l2_subdev(remote_pad->entity);
+		ret = ipu_isys_set_fmt_subdev(av, sd, &fmt);
 			break;
+		}
 		dev_dbg(remote_pad->entity->graph_obj.mdev->dev,
 				"It finds: %s\n", remote_pad->entity->name);
 		sd = media_entity_to_v4l2_subdev(remote_pad->entity);

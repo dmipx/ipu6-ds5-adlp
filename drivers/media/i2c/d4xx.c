@@ -887,7 +887,9 @@ static const struct ds5_format ds5_depth_formats_d46x[] = {
 static const struct ds5_format ds5_y_formats_ds5u[] = {
 	{
 		/* First format: default */
-		.data_type = 0x1e,	/* Y8 */
+		.data_type = 0x2a,	/* Y8 */
+
+		// .data_type = 0x1e,	/* Y8 */
 		.mbus_code = MEDIA_BUS_FMT_SBGGR8_1X8,
 		// .mbus_code = MEDIA_BUS_FMT_UYVY8_1X16,
 		.n_resolutions = ARRAY_SIZE(y8_sizes),
@@ -1212,6 +1214,7 @@ static unsigned int mbus_code_to_mipi(u32 code)
 		return MIPI_CSI2_TYPE_YUV422_10;
 	case MEDIA_BUS_FMT_UYVY8_1X16:
 	case MEDIA_BUS_FMT_YUYV8_1X16:
+	case MEDIA_BUS_FMT_VYUY8_1X16:
 		return MIPI_CSI2_TYPE_YUV422_8;
 	case MEDIA_BUS_FMT_SBGGR12_1X12:
 	case MEDIA_BUS_FMT_SGBRG12_1X12:
@@ -1249,6 +1252,7 @@ static int __ds5_sensor_set_fmt(struct ds5 *state, struct ds5_sensor *sensor,
 				struct v4l2_subdev_format *fmt)
 {
 	struct v4l2_mbus_framefmt *mf;// = &fmt->format;
+	int substream = -1;
 	//unsigned r;
 
 	dev_dbg(sensor->sd.dev, "%s(): state %p, "
@@ -1285,8 +1289,19 @@ static int __ds5_sensor_set_fmt(struct ds5 *state, struct ds5_sensor *sensor,
 
 	mutex_unlock(&state->lock);
 
-	dev_info(sensor->sd.dev, "%s(): pad: %x, code: 0x%x, %ux%u\n", __func__, fmt->pad, fmt->format.code,
-		 fmt->format.width, fmt->format.height);
+	substream = pad_to_substream[sensor->mux_pad];
+
+	if (substream != -1) {
+		set_sub_stream_fmt(substream, mf->code);
+		set_sub_stream_h(substream, mf->height);
+		set_sub_stream_w(substream, mf->width);
+		set_sub_stream_dt(substream, mbus_code_to_mipi(mf->code));
+	}
+
+
+	dev_info(sensor->sd.dev, "%s(): fmt->pad: %d, sensor->mux_pad: %d, code: 0x%x, %ux%u substream:%d\n", __func__,
+		fmt->pad, sensor->mux_pad, fmt->format.code,
+		fmt->format.width, fmt->format.height, substream);
 
 	return 0;
 }
@@ -3445,9 +3460,7 @@ static int ds5_mux_set_fmt(struct v4l2_subdev *sd,
 	u32 pad = sensor->mux_pad;
 	// u32 pad = fmt->pad;
 	int ret = 0;
-	int substream;
-	dev_info(sd->dev, "%s(): fmt->pad:%d, sensor->mux_pad: %d, %d: %ux%u for sensor: %s\n", __func__, 
-		fmt->pad, pad, fmt->format.code, fmt->format.width, fmt->format.height, sensor->sd.name);
+	int substream = -1;
 
 	switch (pad) {
 	case DS5_MUX_PAD_DEPTH_A:
@@ -3470,13 +3483,17 @@ static int ds5_mux_set_fmt(struct v4l2_subdev *sd,
 	}
 	fmt->format = *ffmt;
 
-	substream = pad_to_substream[fmt->pad];
+	// substream = pad_to_substream[fmt->pad];
+	substream = pad_to_substream[pad];
+
 	if (substream != -1) {
 		set_sub_stream_fmt(substream, ffmt->code);
 		set_sub_stream_h(substream, ffmt->height);
 		set_sub_stream_w(substream, ffmt->width);
 		set_sub_stream_dt(substream, mbus_code_to_mipi(ffmt->code));
 	}
+	dev_info(sd->dev, "%s(): fmt->pad:%d, sensor->mux_pad: %d, code: 0x%x: %ux%u substream:%d for sensor: %s\n", __func__, 
+		fmt->pad, pad, fmt->format.code, fmt->format.width, fmt->format.height, substream, sensor->sd.name);
 
 	return ret;
 }
