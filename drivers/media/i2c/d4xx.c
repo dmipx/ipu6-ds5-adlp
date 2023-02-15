@@ -167,11 +167,6 @@ enum ds5_mux_pad {
 /* DFU definition section */
 #define DFU_MAGIC_NUMBER "/0x01/0x02/0x03/0x04"
 #define DFU_BLOCK_SIZE 1024
-
-#define DFU_I2C_STANDARD_MODE		100000
-#define DFU_I2C_FAST_MODE			400000
-#define DFU_I2C_BUS_CLK_RATE		DFU_I2C_FAST_MODE
-
 #define ds5_read_with_check(state, addr, val) {\
 	if (ds5_read(state, addr, val))	\
 		return -EINVAL;}
@@ -410,7 +405,6 @@ struct ds5_dfu_dev {
 	unsigned char *dfu_msg;
 	u16 msg_write_once;
 	unsigned char init_v4l_f;
-	u32 bus_clk_rate;
 };
 
 enum {
@@ -834,7 +828,7 @@ static const struct ds5_resolution d46x_calibration_sizes[] = {
 
 static const struct ds5_resolution ds5_size_imu[] = {
 	{
-	.width =  32,
+	.width = 32,
 	.height = 1,
 	.framerates = ds5_imu_framerates,
 	.n_framerates = ARRAY_SIZE(ds5_imu_framerates),
@@ -888,8 +882,6 @@ static const struct ds5_format ds5_y_formats_ds5u[] = {
 	{
 		/* First format: default */
 		.data_type = 0x2a,	/* Y8 */
-
-		// .data_type = 0x1e,	/* Y8 */
 		.mbus_code = MEDIA_BUS_FMT_SBGGR8_1X8,
 		// .mbus_code = MEDIA_BUS_FMT_UYVY8_1X16,
 		.n_resolutions = ARRAY_SIZE(y8_sizes),
@@ -957,7 +949,7 @@ static const char *ds5_get_sensor_name(struct ds5 *state)
 	static const char *sensor_name[] = {"unknown", "RGB", "DEPTH", "Y8", "IMU"};
 	int sensor_id = state->is_rgb * 1 + state->is_depth * 2 + \
 			state->is_y8 * 3 + state->is_imu * 4;
-	if (sensor_id > (sizeof(sensor_name)/sizeof(*sensor_name)))
+	if (sensor_id >= (sizeof(sensor_name)/sizeof(*sensor_name)))
 		sensor_id = 0;
 
 	return sensor_name[sensor_id];
@@ -1025,8 +1017,8 @@ static int ds5_sensor_enum_mbus_code(struct v4l2_subdev *sd,
 {
 	struct ds5_sensor *sensor = container_of(sd, struct ds5_sensor, sd);
 	//struct ds5_vchan *vchan = sensor->vchan;
-dev_info(sensor->sd.dev, "%s(): sensor %s pad: %d index: %d\n",
-__func__, sensor->sd.name, mce->pad, mce->index);
+	dev_info(sensor->sd.dev, "%s(): sensor %s pad: %d index: %d\n",
+		__func__, sensor->sd.name, mce->pad, mce->index);
 	if (mce->pad)
 		return -EINVAL;
 
@@ -1163,10 +1155,12 @@ static const struct ds5_format *ds5_sensor_find_format(
 	dev_info(sensor->sd.dev, "%s(): mbus_code = %x, code = %x \n",
 			__func__, fmt->mbus_code, ffmt->code);
 
-	if (i == sensor->n_formats)
+	if (i == sensor->n_formats) {
 		/* Not found, use default */
+		dev_dbg(sensor->sd.dev, "%s:%d Not found, use default\n",
+			__func__, __LINE__);
 		fmt = sensor->formats;
-
+	}
 	for (i = 0, res = fmt->resolutions; i < fmt->n_resolutions; i++, res++) {
 		unsigned long delta = abs(ffmt->width * ffmt->height -
 				res->width * res->height);
@@ -1227,6 +1221,7 @@ static unsigned int mbus_code_to_mipi(u32 code)
 	case MEDIA_BUS_FMT_SGRBG10_1X10:
 	case MEDIA_BUS_FMT_SRGGB10_1X10:
 		return MIPI_CSI2_TYPE_RAW10;
+	case MEDIA_BUS_FMT_Y8_1X8:
 	case MEDIA_BUS_FMT_SBGGR8_1X8:
 	case MEDIA_BUS_FMT_SGBRG8_1X8:
 	case MEDIA_BUS_FMT_SGRBG8_1X8:
@@ -1790,7 +1785,7 @@ static const struct v4l2_subdev_ops ds5_imu_subdev_ops = {
 static int ds5_hw_set_auto_exposure(struct ds5 *state, u32 base, s32 val)
 {
 	if (val != V4L2_EXPOSURE_APERTURE_PRIORITY &&
-			val != V4L2_EXPOSURE_MANUAL)
+		val != V4L2_EXPOSURE_MANUAL)
 		return -EINVAL;
 
 	/*
@@ -2194,11 +2189,11 @@ static int ds5_s_ctrl(struct v4l2_ctrl *ctrl)
 						sizeof(struct hwm_cmd) + 512);
 				devm_kfree(&state->client->dev, calib_cmd);
 			}
-
 		}
 		break;
 	case DS5_CAMERA_CID_AE_ROI_SET: {
 		struct hwm_cmd ae_roi_cmd;
+
 		memcpy(&ae_roi_cmd, &set_ae_roi, sizeof(ae_roi_cmd));
 		ae_roi_cmd.param1 = *((u16*)ctrl->p_new.p_u16);
 		ae_roi_cmd.param2 = *((u16*)ctrl->p_new.p_u16 + 1);
@@ -2210,6 +2205,7 @@ static int ds5_s_ctrl(struct v4l2_ctrl *ctrl)
 		}
 	case DS5_CAMERA_CID_AE_SETPOINT_SET: {
 		struct hwm_cmd *ae_setpoint_cmd;
+
 		if (ctrl->p_new.p_s32) {
 			dev_dbg(&state->client->dev, "%s():0x%x \n",
 					__func__, *(ctrl->p_new.p_s32));
@@ -2457,7 +2453,6 @@ static int ds5_gvd(struct ds5 *state, unsigned char *data)
 
 	return ret;
 }
-
 
 static int ds5_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 {
@@ -3144,10 +3139,8 @@ static int ds5_sensor_init(struct i2c_client *c, struct ds5 *state,
 	struct media_entity *entity = &sensor->sd.entity;
 	struct media_pad *pad = &sensor->pad;
 	dev_t *dev_num = &state->client->dev.devt;
-
-	dev_info(sd->dev, "%s(): %p %s %p %p", __func__, c, c->name, state, state->client);
-
 	struct d4xx_pdata *dpdata = c->dev.platform_data;
+
 	v4l2_i2c_subdev_init(sd, c, ops);
 	sd->owner = NULL;
 	sd->internal_ops = &ds5_sensor_internal_ops;
@@ -3455,8 +3448,6 @@ static int ds5_mux_set_fmt(struct v4l2_subdev *sd,
 	struct ds5 *state = container_of(sd, struct ds5, mux.sd.subdev);
 	struct v4l2_mbus_framefmt *ffmt;
 	struct ds5_sensor *sensor = state->mux.last_set;
-
-
 	u32 pad = sensor->mux_pad;
 	// u32 pad = fmt->pad;
 	int ret = 0;
@@ -3492,7 +3483,7 @@ static int ds5_mux_set_fmt(struct v4l2_subdev *sd,
 		set_sub_stream_w(substream, ffmt->width);
 		set_sub_stream_dt(substream, mbus_code_to_mipi(ffmt->code));
 	}
-	dev_info(sd->dev, "%s(): fmt->pad:%d, sensor->mux_pad: %d, code: 0x%x: %ux%u substream:%d for sensor: %s\n", __func__, 
+	dev_dbg(sd->dev, "%s(): fmt->pad:%d, sensor->mux_pad: %d, code: 0x%x: %ux%u substream:%d for sensor: %s\n", __func__,
 		fmt->pad, pad, fmt->format.code, fmt->format.width, fmt->format.height, substream, sensor->sd.name);
 
 	return ret;
@@ -3529,7 +3520,7 @@ static int ds5_mux_get_fmt(struct v4l2_subdev *sd,
 		return -EINVAL;
 	}
 
-	dev_info(sd->dev, "%s(): fmt->pad:%d, sensor->mux_pad:%u size:%d-%d, code:0x%x field:%d, color:%d\n", __func__, fmt->pad, pad,
+	dev_dbg(sd->dev, "%s(): fmt->pad:%d, sensor->mux_pad:%u size:%d-%d, code:0x%x field:%d, color:%d\n", __func__, fmt->pad, pad,
 		fmt->format.width, fmt->format.height, fmt->format.code, fmt->format.field, fmt->format.colorspace);
 	return ret;
 }
@@ -3606,9 +3597,6 @@ static int ds5_mux_s_stream(struct v4l2_subdev *sd, int on)
 	dev_info(&state->client->dev, "%s(): %s on = %d\n", __func__, state->mux.last_set->sd.name, on);
 
 	state->mux.last_set->streaming = on;
-
-	//if (on)
-	//	ret = ds5_configure(state);
 
 	// TODO: remove, workaround for FW crash in start
 	msleep_range(100);
@@ -3750,9 +3738,6 @@ static int ds5_mux_s_stream_vc(struct ds5 *state, u16 vc_id, u16 on)
 	dev_info(&state->client->dev, "%s(): %s on = %d\n", __func__, state->mux.last_set->sd.name, on);
 
 	state->mux.last_set->streaming = on;
-
-	//if (on)
-	//	ret = ds5_configure(state);
 
 	// TODO: remove, workaround for FW crash in start
 	msleep_range(100);
@@ -4041,6 +4026,7 @@ e_depth:
 static void ds5_mux_unregistered(struct v4l2_subdev *sd)
 {
 	struct ds5 *state = v4l2_get_subdevdata(sd);
+
 	ds5_sensor_remove(&state->imu.sensor);
 	ds5_sensor_remove(&state->rgb.sensor);
 	ds5_sensor_remove(&state->motion_t.sensor);
@@ -4123,7 +4109,6 @@ static int ds5_mux_init(struct i2c_client *c, struct ds5 *state)
 
 	struct d4xx_pdata *dpdata = c->dev.platform_data;
 	v4l2_i2c_subdev_init(sd, c, &ds5_mux_subdev_ops);
-
 	// Set owner to NULL so we can unload the driver module
 	sd->owner = NULL;
 	sd->internal_ops = &ds5_mux_internal_ops;
@@ -4131,7 +4116,6 @@ static int ds5_mux_init(struct i2c_client *c, struct ds5 *state)
 	snprintf(sd->name, sizeof(sd->name), "DS5 mux %c", dpdata->suffix);
 
 	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
-
 	entity->obj_type = MEDIA_ENTITY_TYPE_V4L2_SUBDEV;
 	entity->function = MEDIA_ENT_F_CAM_SENSOR;
 
@@ -4373,7 +4357,7 @@ static int ds5_dfu_wait_for_status(struct ds5 *state)
 		if (!status)
 			break;
 		msleep_range(DS5_START_POLL_TIME);
-		}
+	}
 
 	return ret;
 };
@@ -4391,7 +4375,7 @@ static int ds5_dfu_switch_to_dfu(struct ds5 *state)
 	do {
 		msleep_range(DS5_START_POLL_TIME*10);
 		ret = ds5_read(state, 0x5000, &status);
-	} while (ret && i-- );
+	} while (ret && i--);
 	return ret;
 };
 
@@ -4402,6 +4386,7 @@ static int ds5_dfu_wait_for_get_dfu_status(struct ds5 *state,
 	u16 status,dfu_state_len = 0x0000;
 	unsigned char dfu_asw_buf[DFU_WAIT_RET_LEN];
 	unsigned int dfu_wr_wait_msec = 0;
+
 	do {
 		ds5_write_with_check(state, 0x5008, 0x0003); // Get Write state
 		do {
@@ -4434,7 +4419,6 @@ static int ds5_dfu_wait_for_get_dfu_status(struct ds5 *state,
 						| dfu_asw_buf[1];
 	} while (dfu_asw_buf[4] == dfuDNBUSY && exp_state == dfuDNLOAD_IDLE);
 
-
 	if (dfu_asw_buf[4] != exp_state) {
 		dev_notice(&state->client->dev,
 				"%s(): Wrong dfu_state (%d) while expected(%d)\n",
@@ -4446,7 +4430,7 @@ static int ds5_dfu_wait_for_get_dfu_status(struct ds5 *state,
 
 static int ds5_dfu_get_dev_info(struct ds5 *state, struct __fw_status *buf)
 {
-	int ret;
+	int ret = 0;
 	u16 len = 0;
 
 	ret = ds5_write(state, 0x5008, 0x0002); //Upload DFU cmd
@@ -4694,8 +4678,8 @@ static const struct file_operations ds5_device_file_ops = {
 	.release = &ds5_dfu_device_release
 };
 
-struct class* g_ds5_class;
-atomic_t primary_chardev=ATOMIC_INIT(0);
+struct class *g_ds5_class;
+atomic_t primary_chardev = ATOMIC_INIT(0);
 
 static int ds5_chrdev_init(struct i2c_client *c, struct ds5 *state)
 {
@@ -4731,7 +4715,7 @@ static int ds5_chrdev_init(struct i2c_client *c, struct ds5 *state)
 	/* Build up the current device number. To be used further */
 	*dev_num = MKDEV(MAJOR(*dev_num), MINOR(*dev_num));
 	/* Create a device node for this device. */
-	snprintf (dev_name, sizeof(dev_name), "%s%d",
+	snprintf(dev_name, sizeof(dev_name), "%s%d",
 			DS5_DRIVER_NAME_DFU, MAJOR(*dev_num));
 	chr_dev = device_create(*ds5_class, NULL, *dev_num, NULL, dev_name);
 	if (IS_ERR(chr_dev)) {
@@ -4747,7 +4731,7 @@ static int ds5_chrdev_init(struct i2c_client *c, struct ds5 *state)
 
 static int ds5_chrdev_remove(struct ds5 *state)
 {
-	struct class* *ds5_class = &state->dfu_dev.ds5_class;
+	struct class **ds5_class = &state->dfu_dev.ds5_class;
 	dev_t *dev_num = &state->client->dev.devt;
 
 	dev_dbg(&state->client->dev, "%s()\n", __func__);
@@ -4780,8 +4764,9 @@ static void ds5_substream_init(void)
 	set_sub_stream_w(1, 68);
 	set_sub_stream_dt(1, MIPI_CSI2_TYPE_EMBEDDED8);
 	set_sub_stream_vc_id(1, 0);
+	/*RGB*/
 
-	set_sub_stream_fmt(2, MEDIA_BUS_FMT_UYVY8_1X16);
+	set_sub_stream_fmt(2, MEDIA_BUS_FMT_YUYV8_1X16);
 	set_sub_stream_h(2, 640);
 	set_sub_stream_w(2, 480);
 	set_sub_stream_dt(2, mbus_code_to_mipi(MEDIA_BUS_FMT_UYVY8_1X16));
@@ -4792,7 +4777,7 @@ static void ds5_substream_init(void)
 	set_sub_stream_w(3, 68);
 	set_sub_stream_dt(3, MIPI_CSI2_TYPE_EMBEDDED8);
 	set_sub_stream_vc_id(3, 1);
-
+	/*IR*/
 	set_sub_stream_fmt(4, MEDIA_BUS_FMT_UYVY8_1X16);
 	set_sub_stream_h(4, 640);
 	set_sub_stream_w(4, 480);
