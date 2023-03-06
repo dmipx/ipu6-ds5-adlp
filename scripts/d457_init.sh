@@ -2,6 +2,7 @@ format="UYVY"
 format_ir="SGRBG8"
 format_ir="UYVY"
 format_meta="UYVY"
+format_imu="RAW8"
 #resolusion_depth="640x480"
 resolusion_depth="848x480"
 #resolusion_depth="1280x720"
@@ -14,7 +15,7 @@ resolusion_ir="848x480"
 #resolusion_meta="1280x4"
 resolusion_meta="640x480"
 resolusion_meta="640x1"
-
+resolusion_imu="32x1"
 # DS5 MUX. Can be {a, b, c, d}.
 mux=${1:-'a'}
 
@@ -34,10 +35,11 @@ csi2="CSI-2 ${media_mux_csi2_link[${mux}]}"
 
 be_soc_cap="BE SOC ${media_mux_capture_link[${mux}]}capture"
 
+media-ctl -v -l "\"Intel IPU6 ${csi2}\":1 -> \"Intel IPU6 ${csi2_be_soc}\":0[1]"
 
 media-ctl -v -l "\"D4XX depth ${mux}\":0 -> \"DS5 mux ${mux}\":1[1]"
 media-ctl -v -l "\"DS5 mux ${mux}\":0 -> \"Intel IPU6 ${csi2}\":0[1]"
-media-ctl -v -l "\"Intel IPU6 ${csi2}\":1 -> \"Intel IPU6 ${csi2_be_soc}\":0[1]"
+
 # video streaming node
 media-ctl -v -l "\"Intel IPU6 ${csi2_be_soc}\":1 -> \"Intel IPU6 ${be_soc_cap} 0\":0[5]"
 # metadata node
@@ -45,14 +47,19 @@ media-ctl -v -l "\"Intel IPU6 ${csi2_be_soc}\":2 -> \"Intel IPU6 ${be_soc_cap} 1
 
 media-ctl -v -l "\"D4XX rgb ${mux}\":0 -> \"DS5 mux ${mux}\":2[1]"
 media-ctl -v -l "\"DS5 mux ${mux}\":0 -> \"Intel IPU6 ${csi2}\":0[1]"
-media-ctl -v -l "\"Intel IPU6 ${csi2}\":1 -> \"Intel IPU6 ${csi2_be_soc}\":0[1]"
+
 media-ctl -v -l "\"Intel IPU6 ${csi2_be_soc}\":3 -> \"Intel IPU6 ${be_soc_cap} 2\":0[5]"
 media-ctl -v -l "\"Intel IPU6 ${csi2_be_soc}\":4 -> \"Intel IPU6 ${be_soc_cap} 3\":0[5]"
 
 media-ctl -v -l "\"D4XX motion detection ${mux}\":0 -> \"DS5 mux ${mux}\":3[1]"
 media-ctl -v -l "\"DS5 mux ${mux}\":0 -> \"Intel IPU6 ${csi2}\":0[1]"
-media-ctl -v -l "\"Intel IPU6 ${csi2}\":1 -> \"Intel IPU6 ${csi2_be_soc}\":0[1]"
+
 media-ctl -v -l "\"Intel IPU6 ${csi2_be_soc}\":5 -> \"Intel IPU6 ${be_soc_cap} 4\":0[5]"
+
+# IMU link
+media-ctl -v -l "\"D4XX imu ${mux}\":0 -> \"DS5 mux ${mux}\":4[1]"
+media-ctl -v -l "\"Intel IPU6 ${csi2_be_soc}\":6 -> \"Intel IPU6 ${be_soc_cap} 5\":0[5]"
+
 
 ##########################################
 # SET FORMATS
