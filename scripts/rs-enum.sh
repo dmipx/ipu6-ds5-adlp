@@ -16,13 +16,22 @@
 #
 # Alderlake:
 #$ ./rs-enum.sh 
-# Bus   Camera  Sensor  Node Type  Video Node    RS Link
-# ipu6  3       depth   Streaming  /dev/video52  /dev/video-rs-depth-3
-# ipu6  3       depth   Metadata   /dev/video53  /dev/video-rs-depth-md-3
-# ipu6  3       ir      Streaming  /dev/video56  /dev/video-rs-ir-3
-# ipu6  3       color   Streaming  /dev/video54  /dev/video-rs-color-3
-# ipu6  3       color   Metadata   /dev/video55  /dev/video-rs-color-md-3
-#
+#Bus	Camera	Sensor	Node Type	Video Node	RS Link
+# ipu6	0	depth	  Streaming	/dev/video4 	  /dev/video-rs-depth-0
+# ipu6	0	depth	  Metadata	/dev/video5	    /dev/video-rs-depth-md-0
+# ipu6	0	ir	    Streaming	/dev/video8	    /dev/video-rs-ir-0
+# ipu6	0	imu	    Streaming	/dev/video9	    /dev/video-rs-imu-0
+# ipu6	0	color	  Streaming	/dev/video6	    /dev/video-rs-color-0
+# ipu6	0	color	  Metadata	/dev/video7	    /dev/video-rs-color-md-0
+# i2c 	0	d4xx   	Firmware 	/dev/d4xx-dfu-a	/dev/d4xx-dfu-0
+# ipu6	2	depth	  Streaming	/dev/video36	  /dev/video-rs-depth-2
+# ipu6	2	depth	  Metadata	/dev/video37  	/dev/video-rs-depth-md-2
+# ipu6	2	ir	    Streaming	/dev/video40	  /dev/video-rs-ir-2
+# ipu6	2	imu	    Streaming	/dev/video41	  /dev/video-rs-imu-2
+# ipu6	2	color 	Streaming	/dev/video38	  /dev/video-rs-color-2
+# ipu6	2	color 	Metadata	/dev/video39	  /dev/video-rs-color-md-2
+# i2c 	2	d4xx   	Firmware 	/dev/d4xx-dfu-c	/dev/d4xx-dfu-2
+
 # Dependency: v4l-utils
 #
 # parse command line parameters
@@ -43,7 +52,7 @@ done
 
 declare -A camera_idx=( [a]=0 [b]=1 [c]=2 [d]=3 )
 declare -A d4xx_vc=([1]=1 [2]=3 [4]=5)
-declare -A d4xx_vc_named=([depth]=1 [rgb]=3 ["motion detection"]=5 [imu]=7)
+declare -A d4xx_vc_named=([depth]=1 [rgb]=3 ["motion detection"]=5 [imu]=6)
 declare -A camera_names=( [depth]=depth [rgb]=color ["motion detection"]=ir [imu]=imu )
 
 camera_vid=("depth" "depth-md" "color" "color-md" "ir" "imu")
@@ -77,6 +86,13 @@ if [ -n "$(v4l2-ctl --list-devices | grep tegra)" ]; then
     if [[ $info -eq 0 ]] && [[ $bus != "usb" ]]; then
       [[ -e $dev_ln ]] && sudo unlink $dev_ln
       sudo ln -s $vid $dev_ln
+      # Create DFU device link for camera on jetson
+      subdev=$(media-ctl --print-dot | grep "D4XX depth ${camera} | awk -F'|' '{print $2}' | awk -F'/' '{print $3}' | tr -d ' '")
+      i2cdev=$(ls -l /sys/class/video4linux/${subdev}/device | awk -F'/' '{print $9}')
+      dev_dfu_name="/dev/d4xx-dfu-${i2cdev}"
+      dev_dfu_ln="/dev/d4xx-dfu-${cam_id}"
+      [[ -e $dev_dfu_ln ]] && sudo unlink $dev_dfu_ln
+      sudo ln -s $dev_dfu_name $dev_dfu_ln
     fi
   done
 exit 0
@@ -87,20 +103,27 @@ fi
 dot=$(media-ctl --print-dot)
 # for all d457 muxes a, b, c and d
 for camera in a b c d; do
+  create_dfu_dev=0
   for sens in "${!d4xx_vc_named[@]}"; do
     # get sensor binding from media controller
     d4xx_sens=$(echo "${dot}" | grep "D4XX $sens $camera" | awk '{print $1}')
+
     [[ -z $d4xx_sens ]] && continue; # echo "SENS $sens NOT FOUND" && continue
+
     d4xx_sens_mux=$(echo "${dot}" | grep $d4xx_sens:port0 | awk '{print $3}' | awk -F':' '{print $1}')
     csi2=$(echo "${dot}" | grep $d4xx_sens_mux:port0 | awk '{print $3}' | awk -F':' '{print $1}')
     be_soc=$(echo "${dot}" | grep $csi2:port1 | grep -v dashed | awk '{print $3}' | awk -F':' '{print $1}')
     vid_nd=$(echo "${dot}" | grep "$be_soc:port${d4xx_vc_named[${sens}]}" | grep -v dashed | awk '{print $3}' | awk -F':' '{print $1}')
+
     [[ -z $vid_nd ]] && continue; # echo "SENS $sens NOT FOUND" && continue
+
     vid=$(echo "${dot}" | grep "${vid_nd}" | grep video | tr '\\n' '\n' | grep video | awk -F'"' '{print $1}')
+    [[ -z $vid ]] && continue;
     dev_ln="/dev/video-rs-${camera_names["${sens}"]}-${camera_idx[${camera}]}"
     dev_name=$(v4l2-ctl -d $vid -D | grep Model | awk -F':' '{print $2}')
-    # echo Sensor: $sens,\t Device: $vid,\t Link $dev_ln
+
     printf '%s\t%d\t%s\tStreaming\t%s\t%s\n' "$dev_name" ${camera_idx[${camera}]} ${camera_names["${sens}"]} $vid $dev_ln
+
     # create link only in case we choose not only to show it
     if [[ $info -eq 0 ]]; then
       [[ -e $dev_ln ]] && sudo unlink $dev_ln
@@ -108,13 +131,17 @@ for camera in a b c d; do
       # activate ipu6 link enumeration feature
       v4l2-ctl -d $dev_ln -c enumerate_graph_link=1
     fi
+    create_dfu_dev=1 # will create DFU device link for camera
     # metadata link
     # skip IR metadata node for now.
     [[ ${camera_names["${sens}"]} == 'ir' ]] && continue
+    # skip IMU metadata node.
+    [[ ${camera_names["${sens}"]} == 'imu' ]] && continue
+
     vid_num=$(echo $vid | grep -o '[0-9]\+')
     dev_md_ln="/dev/video-rs-${camera_names["${sens}"]}-md-${camera_idx[${camera}]}"
     dev_name=$(v4l2-ctl -d "/dev/video$(($vid_num+1))" -D | grep Model | awk -F':' '{print $2}')
-    # echo Metadata: $sens,\t Device: "/dev/video$(($vid_num+1))",\t Link: $dev_md_ln
+
     printf '%s\t%d\t%s\tMetadata\t/dev/video%s\t%s\n' "$dev_name" ${camera_idx[${camera}]} ${camera_names["${sens}"]} $(($vid_num+1)) $dev_md_ln
     # create link only in case we choose not only to show it
     if [[ $info -eq 0 ]]; then
@@ -122,6 +149,17 @@ for camera in a b c d; do
       sudo ln -s "/dev/video$(($vid_num+1))" $dev_md_ln
     fi
   done
+  # create DFU device link for camera
+  if [[ ${create_dfu_dev} -eq 1 ]]; then
+    dev_dfu_name="/dev/d4xx-dfu-${camera}"
+    dev_dfu_ln="/dev/d4xx-dfu-${camera_idx[${camera}]}"
+    if [[ $info -eq 0 ]]; then
+      [[ -e $dev_dfu_ln ]] && sudo unlink $dev_dfu_ln
+      sudo ln -s $dev_dfu_name $dev_dfu_ln
+    else
+      printf '%s\t%d\t%s\tFirmware \t%s\t%s\n' " i2c " ${camera_idx[${camera}]} "d4xx   " $dev_dfu_name $dev_dfu_ln
+    fi
+  fi
 done
 
 # end of file
