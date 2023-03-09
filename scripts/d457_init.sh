@@ -27,7 +27,9 @@ declare -A media_mux_csi2_link=( [a]=0 [b]=1 [c]=2 [d]=3 )
 #declare -A media_mux_csi2_link=( [c]=0 [b]=1 [a]=2 [d]=3 )
 
 
-declare -A serdes_mux_i2c_bus=( [a]=2 [b]=2 [c]=4 [d]=4 )
+#declare -A serdes_mux_i2c_bus=( [a]=2 [b]=2 [c]=4 [d]=4 )
+declare -A serdes_mux_i2c_bus=( [a]=5 [b]=5 [c]=5 [d]=5 )
+
 
 csi2_be_soc="CSI2 BE SOC ${media_mux_csi2_link[${mux}]}"
 
