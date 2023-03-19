@@ -1,0 +1,24 @@
+FROM local/ipu6-env as base
+
+ARG GIT_REPO_ROOT
+
+WORKDIR /build/
+RUN git clone --depth 1 --branch realsense_ipu6 --single-branch https://github.com/dmipx/ipu6-drivers.git
+
+WORKDIR /build/ipu6-drivers/
+#update uapi header
+RUN cp include/uapi/linux/ipu-isys.h /usr/src/linux-headers-5.15.49-for-ubuntu/include/uapi/linux/ipu-isys.h
+
+#build modules
+RUN make -j -C /usr/src/linux-headers-5.15.49-for-ubuntu/ M=$(pwd)
+
+#Results:
+RUN mkdir -p /build/results/ &&\
+    cp ./drivers/media/i2c/d4xx.ko /build/results/ &&\
+    cp ./drivers/media/i2c/max9295.ko /build/results/ &&\
+    cp ./drivers/media/i2c/max9296.ko /build/results/ &&\
+    cp ./drivers/media/pci/intel/ipu6/intel-ipu6-isys.ko /build/results/
+
+
+LABEL version="0.0.1"
+MAINTAINER "dmitry.perchanov@intel.com"
